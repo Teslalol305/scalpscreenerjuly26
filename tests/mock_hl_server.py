@@ -12,6 +12,7 @@ import contextlib
 import itertools
 import json
 import math
+import time
 from collections import Counter
 from typing import Any
 
@@ -100,7 +101,7 @@ class MockHLServer:
                 await asyncio.sleep(self.trade_interval)
                 self._t += 1
                 t = self._t
-                ts_ms = 1_700_000_000_000 + t * int(self.trade_interval * 1000)
+                ts_ms = int(time.time() * 1000)  # wall clock: realistic ingest latency
                 for coin in self.coins:
                     px = self._price(coin, t)
                     if ("trades", coin) in subscribed:

@@ -12,6 +12,12 @@ from typing import Any
 
 from tapescreen.config import Config
 from tapescreen.core.events import Bbo, BookTop, Event, FeedStatus, PerpCtx, Tick
+from tapescreen.core.features import FeatureEngine, FeatureSnapshot
+from tapescreen.core.signals.base import SignalEvent
+from tapescreen.core.signals.composite import Composite
+from tapescreen.core.state import SymbolState
+from tapescreen.store.db import Db
+from tapescreen.store.outcomes import OutcomeTracker
 
 
 def percentile(sorted_vals: list[float], q: float) -> float:
@@ -23,28 +29,96 @@ def percentile(sorted_vals: list[float], q: float) -> float:
 
 
 class Engine:
-    """Event fan-in: updates per-symbol state, tracks ingest latency and staleness."""
+    """Event fan-in: state -> features -> signals -> persistence + UI feed."""
 
-    def __init__(self, cfg: Config) -> None:
+    def __init__(self, cfg: Config, db: Db | None = None) -> None:
         self.cfg = cfg
+        self.db = db
         self.started_at = time.time()
         self.events_total = 0
         self.ticks_total = 0
         # ingest latency = ts_recv - ts_exch on trades (includes venue+network+clock skew)
         self.ingest_lat: deque[float] = deque(maxlen=1000)
+        # monotonic receive stamps of unpushed ticks; UI server drains for tick->UI latency
+        self.tick_monos: deque[float] = deque(maxlen=2000)
         self.last_tick_ts: dict[str, float] = {sym: 0.0 for sym in cfg.symbols}
         self.last_any_ts: dict[str, float] = {sym: 0.0 for sym in cfg.symbols}
         self.feed_status: dict[str, FeedStatus] = {}
+        # per-symbol rolling state + feature engines + composite scorers
+        self.states: dict[str, SymbolState] = {sym: SymbolState(sym, cfg) for sym in cfg.symbols}
+        self.features: dict[str, FeatureEngine] = {
+            sym: FeatureEngine(st) for sym, st in self.states.items()
+        }
+        self.composites: dict[str, Composite] = {sym: Composite(cfg, sym) for sym in cfg.symbols}
+        self.flags: dict[str, dict] = {sym: {} for sym in cfg.symbols}
+        self.outcomes = OutcomeTracker(cfg, db)
+        self.signal_feed: deque[dict] = deque(maxlen=500)  # newest last; UI reverses
+        self.signals_total = 0
+        self._signal_listeners: list = []  # callables(dict) for immediate UI push
+        self._funding_persist_ts: dict[str, float] = {sym: 0.0 for sym in cfg.symbols}
+        for sym, st in self.states.items():
+            st.on_bar_1s.append(self._make_signal_hook(sym))
+        if db is not None:
+            self._seed_funding_from_db()
+
+    def _seed_funding_from_db(self) -> None:
+        assert self.db is not None
+        since = time.time() - 7 * 86400.0
+        for sym, st in self.states.items():
+            hist = self.db.load_funding(sym, since)
+            if hist:
+                st.seed_funding(hist)
+
+    def add_signal_listener(self, cb) -> None:
+        self._signal_listeners.append(cb)
+
+    def _make_signal_hook(self, sym: str):
+        comp = self.composites[sym]
+        fe = self.features[sym]
+
+        def hook(_st: SymbolState, _bar) -> None:
+            events, flags = comp.evaluate(fe.snapshot)
+            self.flags[sym] = flags
+            for ev in events:
+                self._record_signal(ev)
+
+        return hook
+
+    def _record_signal(self, ev: SignalEvent) -> None:
+        self.signals_total += 1
+        sid = self.db.insert_signal(ev) if self.db is not None else self.signals_total
+        self.outcomes.track(sid, ev)
+        row = {
+            "id": sid, "ts": ev.ts, "symbol": ev.symbol, "side": ev.side,
+            "rule": ev.rule, "strength": round(ev.strength, 3), "tier": ev.tier,
+            "score": round(ev.score, 1), "snapshot": ev.snapshot,
+        }
+        self.signal_feed.append(row)
+        for cb in self._signal_listeners:
+            cb(row)
+
+    def snapshot(self, symbol: str) -> FeatureSnapshot:
+        return self.features[symbol].snapshot
 
     def on_event(self, ev: Event) -> None:
         self.events_total += 1
         if isinstance(ev, Tick):
             self.ticks_total += 1
             self.ingest_lat.append(ev.ts_recv - ev.ts_exch)
+            self.tick_monos.append(ev.ts_mono)
             self.last_tick_ts[ev.symbol] = ev.ts_recv
             self.last_any_ts[ev.symbol] = ev.ts_recv
-        elif isinstance(ev, (BookTop, Bbo, PerpCtx)):
+            self.states[ev.symbol].on_event(ev)
+            self.outcomes.on_tick(ev)
+        elif isinstance(ev, (BookTop, Bbo)):
             self.last_any_ts[ev.symbol] = ev.ts_recv
+            self.states[ev.symbol].on_event(ev)
+        elif isinstance(ev, PerpCtx):
+            self.last_any_ts[ev.symbol] = ev.ts_recv
+            self.states[ev.symbol].on_event(ev)
+            if self.db is not None and ev.ts_recv - self._funding_persist_ts[ev.symbol] >= 60.0:
+                self._funding_persist_ts[ev.symbol] = ev.ts_recv
+                self.db.insert_funding(ev.symbol, ev.ts_recv, ev.funding_rate)
         elif isinstance(ev, FeedStatus):
             self.feed_status[ev.venue] = ev
 
@@ -60,6 +134,9 @@ class Engine:
             "uptime_s": round(now - self.started_at, 1),
             "events_total": self.events_total,
             "ticks_total": self.ticks_total,
+            "signals_total": self.signals_total,
+            "outcomes_completed": self.outcomes.completed_total,
+            "db_write_errors": self.db.write_errors if self.db else 0,
             "ingest_latency_p50_ms": round(percentile(lat, 50) * 1000, 1),
             "ingest_latency_p95_ms": round(percentile(lat, 95) * 1000, 1),
             "stale_symbols": self.stale_symbols(now),
