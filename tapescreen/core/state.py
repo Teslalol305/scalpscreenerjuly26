@@ -246,15 +246,7 @@ class SymbolState:
         while self.ticks and self.ticks[0].ts_recv < cut:
             self.ticks.popleft()
 
-        # 10s activity bucket (non-overlapping, aligned)
-        bts = t.ts_recv - (t.ts_recv % 10.0)
-        if bts != self._cur_bucket_ts:
-            if self._cur_bucket_ts >= 0:
-                self.bucket_vol.add(self._cur_bucket_vol)
-                self.bucket_trades.add(float(self._cur_bucket_trades))
-            self._cur_bucket_ts = bts
-            self._cur_bucket_vol = 0.0
-            self._cur_bucket_trades = 0
+        # 10s activity bucket totals (rollover is event-time driven, in _advance)
         self._cur_bucket_vol += sz
         self._cur_bucket_trades += 1
 
@@ -312,16 +304,19 @@ class SymbolState:
                 thresh = self.cfg.features.wall_mult * median
                 walls += [Wall("bid", px, sz) for px, sz in book.bids if sz >= thresh]
                 walls += [Wall("ask", px, sz) for px, sz in book.asks if sz >= thresh]
-        # wall-pull: a previous wall vanished without price trading through it
+        # wall-pull: a previous wall vanished without price trading through it and
+        # while its price is still inside the mirrored window (else it just slid out)
         cur_px = {(w.side, w.price) for w in walls}
         for w in prev_walls:
             if (w.side, w.price) in cur_px:
                 continue
-            traded_through = (
-                (w.side == "bid" and self.last_price <= w.price)
-                or (w.side == "ask" and self.last_price >= w.price)
-            )
-            if not traded_through:
+            if w.side == "bid":
+                in_window = bool(book.bids) and w.price >= book.bids[-1][0]
+                traded_through = self.last_price <= w.price
+            else:
+                in_window = bool(book.asks) and w.price <= book.asks[-1][0]
+                traded_through = self.last_price >= w.price
+            if in_window and not traded_through:
                 self.last_wall_pull_ts = book.ts_recv
                 self.last_wall_pull_side = w.side
         self.walls = walls
@@ -370,7 +365,9 @@ class SymbolState:
     # ------------------------------------------------------------------ bars
 
     def _advance(self, ts: float) -> None:
-        """Advance event-time; close any 1s/1m bars the new timestamp passed."""
+        """Advance event-time; close any 1s/1m bars and 10s activity buckets the
+        new timestamp passed. Quiet 10s buckets enter the baselines as zeros so
+        z-scores and warm-up reflect elapsed time, not just trading activity."""
         if ts <= self.now:
             self.now = max(self.now, ts)
             return
@@ -387,6 +384,23 @@ class SymbolState:
                 c = closed.close
                 self.cur_1s = Bar(closed.ts + 1.0, c, c, c, c, 0.0, 0.0, 0, 0.0, 0.0)
                 steps += 1
+
+        # 10s activity buckets roll on event time (after the bar rebuilds above,
+        # which chronologically precede this boundary); quiet buckets enter as zeros
+        bts = ts - (ts % 10.0)
+        if self._cur_bucket_ts < 0:
+            self._cur_bucket_ts = bts
+        elif bts > self._cur_bucket_ts:
+            self.bucket_vol.add(self._cur_bucket_vol)
+            self.bucket_trades.add(float(self._cur_bucket_trades))
+            self._cur_bucket_vol = 0.0
+            self._cur_bucket_trades = 0
+            skipped = int((bts - self._cur_bucket_ts) / 10.0) - 1
+            cap = self.bucket_vol._q.maxlen or 1
+            for _ in range(min(skipped, cap)):
+                self.bucket_vol.add(0.0)
+                self.bucket_trades.add(0.0)
+            self._cur_bucket_ts = bts
 
     def _bar_apply(self, t: Tick) -> None:
         px, sz = t.price, t.size
@@ -432,9 +446,10 @@ class SymbolState:
 
     def close_price_ago(self, seconds: float) -> float:
         """Close of the 1s bar ``seconds`` back; 0.0 until that much history exists
-        (so early-session ROCs read 0 instead of silently shrinking their window)."""
+        (so early-session ROCs read 0 instead of silently shrinking their window).
+        bars_1s[-1] closed ~0s ago, so k seconds back is bars_1s[-(k+1)]."""
         n = len(self.bars_1s)
-        k = max(1, int(seconds))
+        k = max(1, int(seconds)) + 1
         if n < k:
             return 0.0
         return self.bars_1s[-k].close

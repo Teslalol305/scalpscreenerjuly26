@@ -183,6 +183,8 @@ class FeatureEngine:
         self.bb_width_pctl = 50.0
         self.squeeze_run_min = 0
         self.squeeze_pctl_max = float(cfgf["squeeze_release"]["bb_width_pctl_max"])
+        self.funding_pctl_q = float(cfgf["funding_extremity"]["pctl"]) / 100.0
+        self.doi_pctl_q = float(cfgf["oi_compression"]["doi_pctl"]) / 100.0
         self.last_1m_range = 0.0
         self.last_1m_dir = 0
         self._prev_1m_close = 0.0
@@ -233,10 +235,10 @@ class FeatureEngine:
         self.last_1m_range = b.high - b.low
         self.last_1m_dir = 1 if b.close >= b.open else -1
 
-        doi5 = self._doi(300.0)
-        st.doi5_samples.append(abs(doi5))
-        if len(st.doi5_samples) > 480:
-            del st.doi5_samples[0]
+        if st.oi_hist:  # signed dOI; skip when no OI data (e.g. candle-seeded warmup bars)
+            st.doi5_samples.append(self._doi(300.0))
+            if len(st.doi5_samples) > 480:
+                del st.doi5_samples[0]
 
     # ------------------------------------------------------------- 1s closes
 
@@ -254,6 +256,8 @@ class FeatureEngine:
             return 0.0
         now_ts, now_oi = hist[-1]
         target = now_ts - window_s
+        if hist[0][0] > target + 15.0:  # not enough history to cover the window yet
+            return 0.0
         past_oi = None
         for ts, oi in hist:
             if ts >= target:
@@ -262,11 +266,14 @@ class FeatureEngine:
         return now_oi - past_oi if past_oi is not None else 0.0
 
     def _funding_p95_7d(self, now: float) -> float:
+        """Trailing 7-day |funding| percentile threshold; 0.0 (= rule disabled)
+        until at least 24h of history exists, so a cold start can't self-flag."""
         if now - self._funding_cache_ts >= 60.0:
             self._funding_cache_ts = now
-            rates = sorted(abs(r) for _, r in self.state.funding_hist)
-            if rates:
-                idx = min(len(rates) - 1, int(math.ceil(0.95 * len(rates))) - 1)
+            hist = self.state.funding_hist
+            if len(hist) >= 2 and hist[-1][0] - hist[0][0] >= 86_400.0:
+                rates = sorted(abs(r) for _, r in hist)
+                idx = min(len(rates) - 1, int(math.ceil(self.funding_pctl_q * len(rates))) - 1)
                 self._funding_p95 = rates[max(0, idx)]
             else:
                 self._funding_p95 = 0.0
@@ -335,7 +342,7 @@ class FeatureEngine:
             samples = st.doi5_samples
             if samples:
                 srt = sorted(samples)
-                idx = min(len(srt) - 1, max(0, int(math.ceil(0.95 * len(srt))) - 1))
+                idx = min(len(srt) - 1, max(0, int(math.ceil(self.doi_pctl_q * len(srt))) - 1))
                 s.doi5_session_p95 = srt[idx]
             mid = (st.bid_px + st.ask_px) / 2.0 if st.bid_px and st.ask_px else 0.0
             s.basis_bps = (ctx.mark - mid) / mid * 1e4 if mid > 0 else 0.0

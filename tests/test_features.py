@@ -234,12 +234,14 @@ def test_roc_staircase(cfg):
         st.on_event(tick(t0 + i + 0.5, 100.0 + i))
     s = fe.snapshot
     assert s.price == pytest.approx(169.0)
-    # ROC(w) = last_price / close_{w sec ago} - 1 ; at now ~= 2070.5:
-    #   10s ago = 2060.5 -> in bar [2060,2061) -> close 160 -> 169/160-1 = 9/160
-    #   30s ago -> bar 2040 close 140 -> 29/140 ; 60s ago -> bar 2010 close 110 -> 59/110
-    assert s.roc_10s == pytest.approx(9.0 / 160.0)
-    assert s.roc_30s == pytest.approx(29.0 / 140.0)
-    assert s.roc_60s == pytest.approx(59.0 / 110.0)
+    # ROC(w) = last_price / close_{w sec ago} - 1. The reference price 169 is the
+    # close of bar [2069,2070), i.e. the price at ~2070; w seconds before that is
+    # the close of bars_1s[-(w+1)]:
+    #   10s: bar [2059,2060) close 159 -> 169/159-1 = 10/159   (a true 10s span)
+    #   30s: bar [2039,2040) close 139 -> 30/139 ; 60s: bar [2009,2010) close 109 -> 60/109
+    assert s.roc_10s == pytest.approx(10.0 / 159.0)
+    assert s.roc_30s == pytest.approx(30.0 / 139.0)
+    assert s.roc_60s == pytest.approx(60.0 / 109.0)
     # only 70 closed 1s bars: close_price_ago is documented to return 0.0 until the
     # full lookback exists ("early-session ROCs read 0"), so ROC(300) reads 0.0
     assert s.roc_5m == 0.0
@@ -263,11 +265,13 @@ def test_vol_z_and_tps_z_from_10s_buckets(cfg):
     for i in range(6):  # bucket [10020,10030): vol 30, 6 trades
         st.on_event(tick(10020.5 + i, 100.0, 5.0))
     st.on_event(tick(10030.5, 100.0, 40.0))  # pushes bucket 3; current bucket open
-    st.on_event(flush(10040.0))  # closes 1s bars 10030..10039
+    # flush INSIDE bucket [10030,10040) so the 40-print bucket stays current and
+    # only the three complete buckets form the baseline
+    st.on_event(flush(10039.5))  # closes 1s bars 10030..10038
 
     # Baseline buckets: vols [10,20,30] -> mean 20, population sd = sqrt((100+0+100)/3)
     #   = sqrt(200/3) ; trades [2,4,6] -> mean 4, sd = sqrt((4+0+4)/3) = sqrt(8/3)
-    # Final rebuild is the close of bar 10039: the last-10s window is bars 10030..10039,
+    # Final rebuild is the close of bar 10038: the last-10s window is bars 10029..10038,
     # which contains only the size-40 print -> vol_10s = 40, ntrades = 1.
     # vol_z = (40-20)/sqrt(200/3) = sqrt(6) = 2.449489.. ; tps_z = (1-4)/sqrt(8/3) = -1.837117..
     s = fe.snapshot
@@ -381,44 +385,50 @@ def test_session_vwap_sd_and_dist_sigma(cfg):
 
 def test_doi_and_funding_percentiles(cfg):
     st, fe = engine(cfg)
-    # 7-day funding seed: 19 one-minute samples with |rate| = 1e-4 .. 19e-4, alternating sign.
-    st.seed_funding([(6000.0 + 60.0 * i, ((-1.0) ** i) * (i + 1) * 1e-4) for i in range(19)])
+    # 7-day funding seed: 19 samples every 2h ending at ts 7080 (span 36h >= the
+    # 24h minimum the p95 gate requires), |rate| = 1e-4 .. 19e-4, alternating sign.
+    st.seed_funding([(7080.0 - 7200.0 * (18 - i), ((-1.0) ** i) * (i + 1) * 1e-4)
+                     for i in range(19)])
 
-    # OI path: +10 every 30s from 7200 (OI 1000) to 7410 (OI 1120), funding 0.002 throughout.
+    # OI path: samples every 30s from 7080 to 7410 (330s span, so the dOI(5m)
+    # coverage guard - oldest <= target+15s - is satisfied), funding 0.002 throughout.
     oi_path = [
-        (7200.0, 1000.0), (7230.0, 1010.0), (7260.0, 1030.0), (7290.0, 1040.0),
+        (7080.0, 960.0), (7110.0, 980.0), (7140.0, 990.0), (7170.0, 1000.0),
+        (7200.0, 1010.0), (7230.0, 1020.0), (7260.0, 1030.0), (7290.0, 1040.0),
         (7320.0, 1060.0), (7350.0, 1090.0), (7380.0, 1100.0), (7410.0, 1120.0),
     ]
-    st.on_event(ctx(7200.0, oi=1000.0, funding=0.002))
+    st.on_event(ctx(oi_path[0][0], oi=oi_path[0][1], funding=0.002))
     st.on_event(tick(7200.5, 100.0))  # start the 1s bar clock
     for ts, oi in oi_path[1:]:
         st.on_event(ctx(ts, oi=oi, funding=0.002))
     st.on_event(tick(7411.5, 100.0))  # closes bar 7410 -> final rebuild sees full OI history
 
     s = fe.snapshot
-    # OI history trim is trailing 330s: at ts 7410 the cut is 7080, so even the first
-    # sample (7200,1000) is retained. dOI(w) = OI_now - OI at first sample >= now-w,
-    # with now = last sample ts (7410, OI 1120):
-    #   dOI(60):  target 7350 -> first >= 7350 is (7350,1090) -> 1120-1090 = 30
-    #   dOI(300): target 7110 -> first >= 7110 is (7200,1000) -> 1120-1000 = 120
+    # OI trim is trailing 330s: at ts 7410 the cut is 7080, all samples retained.
+    # dOI(w) = OI_now - OI at first sample >= now-w, with now = (7410, OI 1120),
+    # and 0.0 when the oldest sample is younger than target+15s (coverage guard):
+    #   dOI(60):  target 7350 -> (7350,1090) -> 1120-1090 = 30
+    #   dOI(300): target 7110 -> oldest 7080 <= 7125 (covered) -> (7110,980) -> 140
     assert s.doi_1m == pytest.approx(30.0)
-    assert s.doi_5m == pytest.approx(120.0)
-    # 1m closes fired when 1s bars 7260/7320/7380 closed (during the advances of the
-    # ctx events at 7290/7350/7410, i.e. BEFORE those samples were appended):
-    #   close 1: last OI sample (7260,1030), target 6960 -> first is (7200,1000) -> |dOI5| = 30
-    #   close 2: last (7320,1060), target 7020 -> (7200,1000) -> 60
-    #   close 3: last (7380,1100), target 7080 -> (7200,1000) -> 100
-    assert st.doi5_samples == pytest.approx([30.0, 60.0, 100.0])
-    # p95 of [30,60,100]: idx = ceil(0.95*3)-1 = 2 -> 100
-    assert s.doi5_session_p95 == pytest.approx(100.0)
+    assert s.doi_5m == pytest.approx(140.0)
+    # doi5 samples (signed) at the 1m closes fired when 1s bars 7260/7320/7380 closed
+    # (during the advances of the ctx events at 7290/7350/7410, BEFORE those appended):
+    #   close 1: last (7260,1030), target 6960, oldest 7080 > 6975 -> no coverage -> 0.0
+    #   close 2: last (7320,1060), target 7020, oldest 7080 > 7035 -> no coverage -> 0.0
+    #   close 3: last (7380,1100), target 7080, oldest 7080 <= 7095 -> (7080,960) -> 140
+    assert st.doi5_samples == pytest.approx([0.0, 0.0, 140.0])
+    # p95 of [0,0,140]: idx = ceil(0.95*3)-1 = 2 -> 140
+    assert s.doi5_session_p95 == pytest.approx(140.0)
 
-    # funding: ctx sampled at most once per 60s -> appended at 7200/7260/7320/7380 only
-    # (7230/7290/7350/7410 are 30s after the previous sample) -> 19 seeds + 4x 0.002 = 23.
-    assert len(st.funding_hist) == 23
+    # funding: ctx sampled at most once per 60s after the last seed (ts 7080) ->
+    # appended at 7140/7200/7260/7320/7380 (each 60s after the previous append; the
+    # 30s-later samples in between are skipped) -> 19 seeds + 5 = 24.
+    assert len(st.funding_hist) == 24
     assert s.funding == pytest.approx(0.002)
-    # percentile_rank of |0.002| vs the 23 |rates| (all <= 0.002) = 100.0
+    # percentile_rank of |0.002| vs the 24 |rates| (all <= 0.002) = 100.0
     assert s.funding_pctl_7d == pytest.approx(100.0)
-    # p95: sorted abs rates = [1e-4..19e-4, 0.002 x4]; idx = min(22, ceil(0.95*23)-1) = 21 -> 0.002
+    # history spans 36h >= 24h gate; p95: sorted abs = [1e-4..19e-4, 0.002 x5];
+    # idx = min(23, ceil(0.95*24)-1) = 22 -> 0.002
     assert s.funding_abs_p95_7d == pytest.approx(0.002)
 
 

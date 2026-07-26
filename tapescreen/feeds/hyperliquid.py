@@ -36,6 +36,7 @@ class HyperliquidFeed:
         out: asyncio.Queue,
         recorder: Recorder | None = None,
         debug: bool = False,
+        top_levels: int = 10,
     ) -> None:
         self.cfg = cfg
         self.out = out
@@ -45,7 +46,7 @@ class HyperliquidFeed:
         coin_to_symbol = {
             s.venue_symbol: s.ui_symbol for s in symbols.values() if s.venue == "hyperliquid"
         }
-        self.normalizer = Normalizer(coin_to_symbol)
+        self.normalizer = Normalizer(coin_to_symbol, top_levels=top_levels)
         # health counters, read by the status endpoint / UI
         self.connected = False
         self.connected_since = 0.0
@@ -71,9 +72,9 @@ class HyperliquidFeed:
         """Connect/read forever with exponential backoff; returns only when stopped."""
         backoff = self.cfg.backoff_initial_s
         while not self._stop.is_set():
+            session_start = time.monotonic()
             try:
                 await self._session()
-                backoff = self.cfg.backoff_initial_s  # clean exit (stop requested)
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # network errors, watchdog timeouts, protocol junk
@@ -81,6 +82,8 @@ class HyperliquidFeed:
                 self._emit_status(False, f"{type(e).__name__}: {e}")
                 if self._stop.is_set():
                     break
+                if time.monotonic() - session_start >= 30.0:
+                    backoff = self.cfg.backoff_initial_s  # session was stable: fresh backoff
                 self.reconnects += 1
                 delay = backoff * (1.0 + 0.25 * random.random())
                 log.warning(

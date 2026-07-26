@@ -139,6 +139,7 @@ class UiServer:
             "oi_compression": flags.get("oi_compression", False),
             "funding_bias": flags.get("funding_bias", ""),
             "warming": s.warming,
+            "unavailable": sym in self.engine.unavailable,
             "stale": bool(last_tick and now - last_tick > self.cfg.symbol_stale_s)
             or last_tick == 0.0,
         }
@@ -198,7 +199,7 @@ class UiServer:
 
     async def _broadcast(self, text: str) -> None:
         dead = []
-        for ws in self.clients:
+        for ws in list(self.clients):  # snapshot: the set mutates across awaits
             try:
                 await ws.send_text(text)
             except Exception:
@@ -211,17 +212,20 @@ class UiServer:
         live = self.feed is not None
         while True:
             await asyncio.sleep(interval)
-            # forward any signals that arrived since the last cycle, immediately
-            while not self._signal_out.empty():
-                row = self._signal_out.get_nowait()
-                await self._broadcast(json.dumps({"type": "signal", "row": row}))
-            if live:
-                now_mono = time.perf_counter()
-                monos = self.engine.tick_monos
-                while monos:
-                    self.pipe_lat.append(max(0.0, now_mono - monos.popleft()))
-            if self.clients:
-                await self._broadcast(json.dumps(self._grid()))
+            try:
+                # forward any signals that arrived since the last cycle, immediately
+                while not self._signal_out.empty():
+                    row = self._signal_out.get_nowait()
+                    await self._broadcast(json.dumps({"type": "signal", "row": row}))
+                if live:
+                    now_mono = time.perf_counter()
+                    monos = self.engine.tick_monos
+                    while monos:
+                        self.pipe_lat.append(max(0.0, now_mono - monos.popleft()))
+                if self.clients:
+                    await self._broadcast(json.dumps(self._grid()))
+            except Exception:  # one bad cycle must not kill the UI forever
+                log.exception("push cycle failed")
 
     # ------------------------------------------------------------------ lifecycle
 

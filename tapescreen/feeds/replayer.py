@@ -32,6 +32,7 @@ class Replayer:
         symbols: dict[str, SymbolEntry],
         out: asyncio.Queue,
         speed: float = 1.0,
+        top_levels: int = 10,
     ) -> None:
         self.path = Path(path)
         self.out = out
@@ -39,7 +40,7 @@ class Replayer:
         coin_to_symbol = {
             s.venue_symbol: s.ui_symbol for s in symbols.values() if s.venue == "hyperliquid"
         }
-        self.normalizer = Normalizer(coin_to_symbol)
+        self.normalizer = Normalizer(coin_to_symbol, top_levels=top_levels)
         self.frames = 0
         self.events = 0
 

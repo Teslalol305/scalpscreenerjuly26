@@ -30,5 +30,12 @@ ignore = ["E501"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
 [tool.setuptools.packages.find]
 include = ["tapescreen*"]
+
+[tool.setuptools.package-data]
+"tapescreen.server" = ["static/*"]

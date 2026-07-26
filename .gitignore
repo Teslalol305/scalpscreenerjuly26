@@ -10,3 +10,4 @@ data/
 *.db-shm
 logs/
 .venv/
+build/

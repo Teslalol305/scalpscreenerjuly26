@@ -31,9 +31,11 @@ def percentile(sorted_vals: list[float], q: float) -> float:
 class Engine:
     """Event fan-in: state -> features -> signals -> persistence + UI feed."""
 
-    def __init__(self, cfg: Config, db: Db | None = None) -> None:
+    def __init__(self, cfg: Config, db: Db | None = None,
+                 seed_funding_from_db: bool = True) -> None:
         self.cfg = cfg
         self.db = db
+        self.unavailable: set[str] = set()  # symbols absent/delisted on the venue
         self.started_at = time.time()
         self.events_total = 0
         self.ticks_total = 0
@@ -58,8 +60,11 @@ class Engine:
         self._funding_persist_ts: dict[str, float] = {sym: 0.0 for sym in cfg.symbols}
         for sym, st in self.states.items():
             st.on_bar_1s.append(self._make_signal_hook(sym))
-        if db is not None:
+        if db is not None and seed_funding_from_db:
             self._seed_funding_from_db()
+
+    def mark_unavailable(self, symbols: set[str]) -> None:
+        self.unavailable = set(symbols)
 
     def _seed_funding_from_db(self) -> None:
         assert self.db is not None

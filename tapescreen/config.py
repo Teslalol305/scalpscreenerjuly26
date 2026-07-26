@@ -194,8 +194,15 @@ def load_config(path: str | Path = "config.yaml") -> Config:
         rules[name] = r
 
     horizons = _get(doc, "stats.horizons_s")
+    supported_horizons = {30, 60, 180, 300}  # the outcomes schema's ret_* columns
     if not isinstance(horizons, list) or not all(isinstance(h, int) and h > 0 for h in horizons):
         raise ConfigError("config key 'stats.horizons_s' must be a list of positive integers")
+    bad = [h for h in horizons if h not in supported_horizons]
+    if bad:
+        raise ConfigError(
+            f"config key 'stats.horizons_s' contains unsupported horizons {bad}; "
+            f"supported: {sorted(supported_horizons)}"
+        )
 
     return Config(
         port=_int(doc, "ui.port", 1),

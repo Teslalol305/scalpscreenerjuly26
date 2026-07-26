@@ -29,6 +29,14 @@ python -m tapescreen --replay recordings/hl-....ndjson --speed 10   # replay a c
 python -m tapescreen --no-ui                  # headless (feed + signals + DB only)
 ```
 
+Replays are hermetic: each `--replay` writes to a fresh `data/replay-<name>.db`
+(recreated per run) and skips DB-based funding seeding, so the live stats DB is
+never polluted and replaying the same file always yields the same signals. On
+live startup the app checks symbol availability against `metaAndAssetCtxs` and
+seeds 1m-bar indicators + 7-day funding history over REST (`feeds.hyperliquid.warmup`),
+degrading gracefully if the API is unreachable. A crashed internal task is
+logged, shuts the app down, and exits non-zero.
+
 Everything is configured in `config.yaml` (port, every rule threshold/weight,
 cooldowns, tiers, spread-cost haircut, recorder, staleness). The config is
 validated at startup with errors that name the offending key.

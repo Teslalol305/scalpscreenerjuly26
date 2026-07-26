@@ -65,6 +65,14 @@ function buildRow(sym) {
   }
   cells.cvd.innerHTML = `<canvas class="spark" width="96" height="22"></canvas>`;
   cells.imb.innerHTML = `<span class="imb-bar"><i class="b"></i><i class="a"></i></span><span class="imb-txt"></span>`;
+  // persistent nodes: rebuilding these via innerHTML every push would reset the
+  // browser's hover-tooltip timer, so the 7d-percentile title could never show
+  cells.fund.innerHTML = `<span class="fund-badge"></span>`;
+  cells.fundBadge = cells.fund.querySelector(".fund-badge");
+  for (const c of ["sl", "ss"]) {
+    cells[c].innerHTML = `<span class="scorecell"></span>`;
+    cells[c + "Span"] = cells[c].querySelector(".scorecell");
+  }
   tr.addEventListener("click", () => openDrawer(sym));
   gridBody.appendChild(tr);
   state.rows.set(sym, { tr, cells, spark: [], sparkTs: 0, lastPrice: 0 });
@@ -74,6 +82,8 @@ function flash(td, dir) {
   td.classList.remove("flash-up", "flash-dn");
   void td.offsetWidth; // restart animation
   td.classList.add(dir > 0 ? "flash-up" : "flash-dn");
+  td.addEventListener("animationend", () => td.classList.remove("flash-up", "flash-dn"),
+    { once: true });
 }
 
 function drawSpark(canvas, data) {
@@ -134,25 +144,34 @@ function updateRow(sym, r, now) {
 
   cells.spr.textContent = r.spread_bps.toFixed(1);
   const fb = r.funding * 1e4;
-  cells.fund.innerHTML = `<span class="fund-badge ${r.funding_bias ? "hot" : ""}"
-    title="7d pctl ${r.funding_pctl}${r.funding_bias ? " · crowded, bias " + r.funding_bias : ""}">${fmtSigned(fb, 2)}bp</span>`;
+  const badge = cells.fundBadge;
+  badge.textContent = `${fmtSigned(fb, 2)}bp`;
+  badge.className = `fund-badge ${r.funding_bias ? "hot" : ""}`;
+  badge.title = `7d pctl ${r.funding_pctl}${r.funding_bias ? " · crowded, bias " + r.funding_bias : ""}`;
   cells.doi.textContent = fmtSigned(r.doi_5m, Math.abs(r.doi_5m) >= 100 ? 0 : 2);
 
-  for (const [cell, score, isLong] of [[cells.sl, r.score_long, true], [cells.ss, r.score_short, false]]) {
+  for (const [span, score, isLong] of [[cells.slSpan, r.score_long, true], [cells.ssSpan, r.score_short, false]]) {
     const tier = score >= state.alertScore ? "alert" : score >= state.watchScore ? "watch" : "";
-    cell.innerHTML = `<span class="scorecell ${tier}" style="background:${scoreBg(score, isLong)}">${Math.round(score)}</span>`;
+    span.className = `scorecell ${tier}`;
+    span.style.background = scoreBg(score, isLong);
+    span.textContent = Math.round(score);
   }
 
   let badges = "";
+  if (r.unavailable) badges += `<span class="badge-stale" title="not tradable on the venue">n/a</span>`;
   if (r.warming) badges += `<span class="badge-warm" title="baselines still warming">warm</span>`;
-  if (r.stale) badges += `<span class="badge-stale">stale</span>`;
+  if (r.stale && !r.unavailable) badges += `<span class="badge-stale">stale</span>`;
   if (r.oi_compression) badges += `<span class="badge-oi" title="OI building while price flat">OI</span>`;
-  cells.badges.innerHTML = badges;
+  if (cells.badges.innerHTML !== badges) cells.badges.innerHTML = badges;
   row.sortKey = Math.max(r.score_long, r.score_short);
 }
 
+let lastOrder = "";
 function resortGrid() {
   const rows = [...state.rows.values()].sort((a, b) => (b.sortKey || 0) - (a.sortKey || 0));
+  const order = rows.map((r) => r.tr.dataset.sym).join(",");
+  if (order === lastOrder) return; // re-appending restarts CSS animations; skip when unchanged
+  lastOrder = order;
   rows.forEach((r) => gridBody.appendChild(r.tr));
 }
 
@@ -225,6 +244,7 @@ function onSignal(s, live) {
 let audioCtx = null;
 function beep() {
   audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === "suspended") audioCtx.resume(); // ctx created w/o user gesture
   const t0 = audioCtx.currentTime;
   for (const [f, d] of [[880, 0], [1174, 0.16]]) {
     const osc = audioCtx.createOscillator(), g = audioCtx.createGain();
@@ -247,20 +267,26 @@ function alertUser(s) {
   }
 }
 
-$("sound-toggle").addEventListener("click", () => {
-  state.soundOn = !state.soundOn;
-  localStorage.setItem("ts-sound", state.soundOn ? "1" : "0");
-  $("sound-toggle").textContent = state.soundOn ? "🔔" : "🔇";
-  $("sound-toggle").classList.toggle("on", state.soundOn);
-  if (state.soundOn) {
-    beep();
+function setSound(on, interactive) {
+  state.soundOn = on;
+  $("sound-toggle").textContent = on ? "🔔" : "🔇";
+  $("sound-toggle").classList.toggle("on", on);
+  if (on && interactive) {
+    beep(); // audible confirmation only on a real user gesture
     if (Notification.permission === "default") Notification.requestPermission();
   }
+}
+
+$("sound-toggle").addEventListener("click", () => {
+  const on = !state.soundOn;
+  localStorage.setItem("ts-sound", on ? "1" : "0");
+  setSound(on, true);
 });
 
 /* ---------------- drawer (lightweight-charts) ---------------- */
 
 const CHART_OPTS = {
+  autoSize: true,
   layout: { background: { color: "#151a23" }, textColor: "#8a93a6", fontSize: 11 },
   grid: { vertLines: { color: "#1b2230" }, horzLines: { color: "#1b2230" } },
   timeScale: { timeVisible: true, secondsVisible: true, borderColor: "#232b3a" },
@@ -454,7 +480,13 @@ function connect() {
 function onHello(msg) {
   state.alertScore = msg.alert_score;
   state.watchScore = msg.watch_score;
-  if (!state.symbols.length) {
+  if (msg.symbols.join(",") !== state.symbols.join(",")) {
+    // fresh build OR the server restarted with a different watchlist:
+    // rebuild so removed symbols don't linger as frozen ghost rows
+    gridBody.textContent = "";
+    state.rows.clear();
+    lastOrder = "";
+    $("f-symbol").querySelectorAll("option:not([value=''])").forEach((o) => o.remove());
     state.symbols = msg.symbols;
     for (const sym of msg.symbols) {
       buildRow(sym);
@@ -467,8 +499,7 @@ function onHello(msg) {
   for (const s of msg.recent_signals || []) onSignal(s, false);
   refreshFeed();
   const saved = localStorage.getItem("ts-sound");
-  const on = saved === null ? msg.sound_default : saved === "1";
-  if (on !== state.soundOn) $("sound-toggle").click();
+  setSound(saved === null ? msg.sound_default : saved === "1", false);
 }
 
 connect();

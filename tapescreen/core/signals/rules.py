@@ -85,10 +85,14 @@ class SweepReclaim(SignalRule):
 
         if self._sweep_side == LONG:
             self._extreme = min(self._extreme, s.price)
+            # track the imbalance LOW seen during the sweep, so the flip test uses
+            # the true through-0.5 transition rather than the arm-instant value
+            self._imb_at_sweep = min(self._imb_at_sweep, s.agg_imbalance_60s)
             reclaimed = s.price > self._level
             flipped = self._imb_at_sweep < 0.5 < s.agg_imbalance_60s
         else:
             self._extreme = max(self._extreme, s.price)
+            self._imb_at_sweep = max(self._imb_at_sweep, s.agg_imbalance_60s)
             reclaimed = s.price < self._level
             flipped = self._imb_at_sweep > 0.5 > s.agg_imbalance_60s
         if not (reclaimed and flipped):
@@ -198,7 +202,8 @@ class OICompression(SignalRule):
     def evaluate(self, s: FeatureSnapshot) -> SignalEvent | None:
         if s.warming or s.doi5_session_p95 <= 0 or s.roc5m_sigma <= 0:
             return None
-        if abs(s.doi_5m) < s.doi5_session_p95:
+        # signed: OI must be BUILDING (unwinds are not compression)
+        if s.doi_5m <= 0 or s.doi_5m < s.doi5_session_p95:
             return None
         if abs(s.roc_5m) > float(self.p["roc_sigma_max"]) * s.roc5m_sigma:
             return None

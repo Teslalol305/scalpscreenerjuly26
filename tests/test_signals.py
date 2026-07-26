@@ -364,8 +364,9 @@ def test_oi_compression_roc_gate_blocks_flag() -> None:
 def _funding_engine(rate: float) -> Engine:
     eng = Engine(fresh_cfg())
     st = eng.states[SYM]
-    # 7-day-ish history: 100 one-minute samples at |rate| = 1e-4 -> p95 = 1e-4
-    st.seed_funding([(T0 - 60.0 * (100 - i), 1e-4) for i in range(100)])
+    # 33h of history (>= the 24h minimum the p95 gate requires): 100 samples every
+    # 20 min at |rate| = 1e-4 -> p95 = 1e-4
+    st.seed_funding([(T0 - 1200.0 * (100 - i), 1e-4) for i in range(100)])
     eng.on_event(perp(T0 + 0.5, rate, 1000.0))
     eng.on_event(tick(T0 + 0.6, 100.0, 1.0, BUY))
     eng.on_event(flush(T0 + 1.5))
