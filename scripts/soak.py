@@ -50,12 +50,15 @@ async def main() -> int:
         cfg = cfg.replace("path: recordings", f"path: {out}/recordings")
         cfg = cfg.replace("path: data/tapescreen.db", f"path: {out}/soak.db")
         cfg = cfg.replace("path: logs", f"path: {out}/logs")
+        # symbols_file resolves relative to the config file's directory
+        cfg = cfg.replace("symbols_file: symbol_map.yaml",
+                          f"symbols_file: {REPO}/symbol_map.yaml")
         cfg = cfg.replace("baseline_window_s: 1800", "baseline_window_s: 300")
         cfg_path = out / "soak.yaml"
         cfg_path.write_text(cfg)
 
-        app = subprocess.Popen(
-            [sys.executable, "-m", "tapescreen", "--config", str(cfg_path)],
+        app = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", "tapescreen", "--config", str(cfg_path),
             cwd=REPO, stdout=(out / "app.log").open("w"), stderr=subprocess.STDOUT,
         )
         t0 = time.time()
@@ -63,7 +66,7 @@ async def main() -> int:
         try:
             await asyncio.sleep(10)
             while time.time() - t0 < hard_stop:
-                if app.poll() is not None:
+                if app.returncode is not None:
                     reason = f"app exited early rc={app.returncode}"
                     break
                 try:
@@ -83,25 +86,31 @@ async def main() -> int:
                     break
                 await asyncio.sleep(30)
 
-            final_stats = _get(args.port, "/stats")
-            final_health = _get(args.port, "/health")
-            (out / "final_stats.json").write_text(json.dumps(final_stats, indent=1))
-            (out / "final_health.json").write_text(json.dumps(final_health, indent=1))
-            eng, feed = final_health["engine"], final_health["feed"]
-            checks = {
-                "signals_logged": eng["signals_total"] >= 3,
-                "outcomes_completed>=3": (final_stats["totals"].get("completed") or 0) >= 3,
-                "zero_queue_drops": feed.get("queue_drops") == 0,
-                "zero_db_errors": eng["db_write_errors"] == 0,
-                "no_stale_symbols": len(eng["stale_symbols"]) == 0,
-            }
-            print("FINAL:", json.dumps(checks), flush=True)
-            ok = ok and all(checks.values())
-        finally:
-            app.send_signal(_signal.SIGTERM)
             try:
-                rc = app.wait(timeout=20)
-            except subprocess.TimeoutExpired:
+                final_stats = _get(args.port, "/stats")
+                final_health = _get(args.port, "/health")
+                (out / "final_stats.json").write_text(json.dumps(final_stats, indent=1))
+                (out / "final_health.json").write_text(json.dumps(final_health, indent=1))
+                eng, feed = final_health["engine"], final_health["feed"]
+                checks = {
+                    "signals_logged": eng["signals_total"] >= 3,
+                    "outcomes_completed>=3": (final_stats["totals"].get("completed") or 0) >= 3,
+                    "zero_queue_drops": feed.get("queue_drops") == 0,
+                    "zero_db_errors": eng["db_write_errors"] == 0,
+                    "no_stale_symbols": len(eng["stale_symbols"]) == 0,
+                }
+                print("FINAL:", json.dumps(checks), flush=True)
+                ok = ok and all(checks.values())
+            except Exception as e:  # noqa: BLE001 - app already gone: report, fail
+                print(f"final capture failed: {e}", flush=True)
+                ok = False
+        finally:
+            try:
+                app.send_signal(_signal.SIGTERM)
+                rc = await asyncio.wait_for(app.wait(), timeout=20)
+            except ProcessLookupError:
+                rc = app.returncode if app.returncode is not None else -1
+            except TimeoutError:
                 app.kill()
                 rc = -9
             print(f"app shutdown rc={rc}; soak={'PASS' if ok and rc == 0 else 'FAIL'} ({reason})",
