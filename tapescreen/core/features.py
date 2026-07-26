@@ -78,10 +78,10 @@ class Wilder:
 
     @property
     def ready(self) -> bool:
-        return not self._seed or len(self._seed) >= self.n
+        return len(self._seed) >= self.n
 
     def add(self, v: float) -> float:
-        if self.value == 0.0 and len(self._seed) < self.n:
+        if len(self._seed) < self.n:  # SMA warm-up for the first n samples
             self._seed.append(v)
             self.value = sum(self._seed) / len(self._seed)
         else:
