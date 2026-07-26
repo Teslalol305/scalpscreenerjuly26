@@ -86,9 +86,17 @@ Hyperliquid WS ──> feeds/hyperliquid.py ──> asyncio.Queue ──> core/e
 ## Verification & tests
 
 ```bash
-ruff check .        # clean
-python -m pytest    # unit + integration suite
+ruff check .          # clean
+python -m pytest      # unit + integration suite (94 tests)
+python scripts/soak.py --minutes 26   # full-system soak vs the mock venue
 ```
+
+The soak runs the real `python -m tapescreen` process against a mock venue that
+speaks the verified Hyperliquid wire protocol with realistic cadences and
+periodic ignition bursts, and passes only when signals are logged, forward
+outcomes complete through every horizon, and there are zero drops/DB errors.
+The most recent 26-minute soak: 231k events, 35 signals across 11 symbols,
+26 completed outcomes, tick→UI p95 239ms, zero drops, clean shutdown.
 
 - Feature calculators are unit-tested against hand-computed fixtures.
 - A mock Hyperliquid WS server (`tests/mock_hl_server.py`) speaks the verified wire
