@@ -63,9 +63,13 @@ class MockHLServer:
             ws.transport.abort()
 
     def _price(self, coin: str, t: int) -> float:
+        # realistic micro-scale wobble (~5bps) + aperiodic jitter: keeps sigma(ROC)
+        # small so burst repricings (~40bps) are genuine statistical outliers,
+        # the way real ignition prints stand out from quiet tape
         seed = sum(coin.encode())
-        base = self.base_price + seed % 10 + 2.0 * math.sin((t + seed) / 20.0)
-        return base * (1.0 + self._drift.get(coin, 0.0))
+        base = self.base_price + seed % 10
+        wobble = 0.05 * math.sin((t + seed) / 40.0) + 0.02 * ((t * 31 + seed) % 17) / 17.0
+        return (base + wobble) * (1.0 + self._drift.get(coin, 0.0))
 
     def _burst_state(self, t: int) -> tuple[str, str] | None:
         """(coin, side) while a burst is active at virtual time t, else None."""
