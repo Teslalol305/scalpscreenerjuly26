@@ -1,0 +1,102 @@
+# TapeScreen configuration. Validated at startup by tapescreen/config.py;
+# invalid or missing keys produce a clear error naming the key.
+# All rule thresholds are starting points, not truths - tune them against /stats.
+
+ui:
+  port: 5560
+  sound_default: false          # ALERT-tier sound toggle default in the browser
+  push_interval_ms: 250         # server->browser batched diff cadence
+
+symbols_file: symbol_map.yaml
+
+feeds:
+  hyperliquid:
+    ws_url: wss://api.hyperliquid.xyz/ws
+    info_url: https://api.hyperliquid.xyz/info
+    ping_interval_s: 30         # server closes idle (>60s silent) connections
+    watchdog_timeout_s: 10      # no message in 10s -> reconnect
+    backoff_initial_s: 1.0
+    backoff_max_s: 60.0
+    warmup:                     # startup REST snapshots (skipped if unreachable)
+      candles: true             # seed 1m bars for ATR/BB/RSI/EMA/VWAP baselines
+      candle_bars: 120
+      funding_history: true     # seed 7-day funding percentile
+  binance:
+    enabled: false              # secondary venue module, deferred to v1.1
+
+recorder:
+  enabled: true
+  path: recordings
+  rotate_mb: 256
+
+staleness:
+  symbol_stale_s: 30            # no tick in 30s -> UI grays the row
+
+state:
+  bars_1s_cap: 3600             # ring-buffer caps; see core/state.py header
+  bars_1m_cap: 480              # ~8h session scope
+  tick_window_s: 330            # rolling tick retention (covers 5m lookbacks)
+  baseline_window_s: 1800       # trailing 30-min baselines (vol z, sizes, tps)
+
+features:
+  large_print_pctl: 99          # single trade >= p99 of trailing 30-min sizes
+  burst_k: 6                    # >=K same-side aggressor trades ...
+  burst_window_s: 2.0           # ... within T seconds
+  wall_mult: 5.0                # level >= 5x median of top-10 level sizes
+  book_top_levels: 10
+
+rules:
+  momentum_ignition:
+    weight: 30
+    roc_window_s: 30
+    roc_sigma_mult: 2.5         # |ROC(30s)| >= 2.5x its trailing 30-min sigma
+    vol_z_min: 2.5
+    max_spread_bps: 8.0
+  sweep_reclaim:
+    weight: 30
+    lookback_min: 15
+    atr_mult: 0.25              # print beyond prior 15-min extreme by >=0.25x ATR(1m)
+    reclaim_window_s: 45
+  vwap_fade:                    # tagged counter-trend
+    weight: 20
+    band_sigma: 2.5
+    vol_peak_window_min: 5
+  squeeze_release:
+    weight: 25
+    bb_width_pctl_max: 10
+    squeeze_min_minutes: 10
+    range_atr_mult: 2.0
+    vol_z_min: 2.0
+  book_imbalance:
+    weight: 15
+    imbalance_high: 0.65
+    imbalance_low: 0.35
+    sustain_s: 20
+    range_proximity_bps: 10.0
+    range_lookback_min: 15
+  oi_compression:               # context flag, no side, never alerts
+    weight_mult: 1.10           # multiplies composite score when active
+    doi_pctl: 95
+    roc_sigma_max: 0.3
+  funding_extremity:            # context flag / bias badge, never alerts
+    weight_mult_aligned: 1.10   # signal side agrees with funding bias
+    weight_mult_against: 0.90
+    pctl: 95                    # |funding| >= trailing 7-day p95
+
+composite:
+  watch_score: 60
+  alert_score: 80
+  rule_cooldown_s: 90           # per (symbol, rule)
+  alert_cooldown_s: 60          # per (symbol, side)
+
+stats:
+  spread_haircut_bps: 2.0       # hit = signed fwd return > haircut
+  horizons_s: [30, 60, 180, 300]
+  mfe_mae_window_s: 300
+
+db:
+  path: data/tapescreen.db
+
+logging:
+  path: logs
+  feed_debug: false

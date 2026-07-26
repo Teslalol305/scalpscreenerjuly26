@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+recordings/*.ndjson
+data/
+*.db
+*.db-wal
+*.db-shm
+logs/
+.venv/

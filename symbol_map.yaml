@@ -1,0 +1,25 @@
+# TapeScreen symbol map: ui_symbol -> venue mapping.
+# Generated 2026-07-26 from official SDK sources (hyperliquid-python-sdk 0.24.0,
+# @nktkas/hyperliquid 0.33.2) + listing research. The build sandbox could not reach
+# api.hyperliquid.xyz, so statuses are `verified_research`; run
+# `python scripts/verify_symbols.py` from a machine with API access to re-verify
+# live (it rewrites this file with status `verified_live` + szDecimals/maxLeverage).
+# The app re-checks at startup and marks missing/delisted symbols unavailable.
+symbols:
+  BTC:  {venue: hyperliquid, venue_symbol: BTC,  status: verified_research}
+  ETH:  {venue: hyperliquid, venue_symbol: ETH,  status: verified_research}
+  SOL:  {venue: hyperliquid, venue_symbol: SOL,  status: verified_research}
+  HYPE: {venue: hyperliquid, venue_symbol: HYPE, status: verified_research}
+  LINK: {venue: hyperliquid, venue_symbol: LINK, status: verified_research}
+  AAVE: {venue: hyperliquid, venue_symbol: AAVE, status: verified_research}
+  # Only indirect July-2026 evidence for NEAR; verify_symbols.py will confirm live.
+  # Fallback if ever absent: Binance USDS-M NEARUSDT (v1.1 adapter).
+  NEAR: {venue: hyperliquid, venue_symbol: NEAR, status: verified_research}
+  TAO:  {venue: hyperliquid, venue_symbol: TAO,  status: verified_research}
+  WLD:  {venue: hyperliquid, venue_symbol: WLD,  status: verified_research}
+  ZEC:  {venue: hyperliquid, venue_symbol: ZEC,  status: verified_research}
+  AERO: {venue: hyperliquid, venue_symbol: AERO, status: verified_research}
+  PUMP: {venue: hyperliquid, venue_symbol: PUMP, status: verified_research}
+  # LIT = Lighter (lighter.xyz perp DEX, TGE 2025-12-30), NOT Litentry (now Heima/HEI).
+  # Listed on Hyperliquid 2025-12-22 as a pre-market perp; low leverage cap.
+  LIT:  {venue: hyperliquid, venue_symbol: LIT,  status: verified_research}
