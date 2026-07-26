@@ -20,6 +20,8 @@ from tapescreen.feeds.hyperliquid import HyperliquidFeed
 from tapescreen.feeds.recorder import Recorder
 from tapescreen.feeds.replayer import Replayer
 from tapescreen.logs import setup_logging
+from tapescreen.server.app import UiServer
+from tapescreen.store.db import Db
 
 log = logging.getLogger("tapescreen.main")
 
@@ -35,7 +37,8 @@ async def _consume(queue: asyncio.Queue, engine: Engine) -> None:
 
 async def run(cfg: Config, args: argparse.Namespace) -> int:
     queue: asyncio.Queue = asyncio.Queue(maxsize=QUEUE_CAP)
-    engine = Engine(cfg)
+    db = Db(cfg.db_path)
+    engine = Engine(cfg, db)
     stop = asyncio.Event()
 
     loop = asyncio.get_running_loop()
@@ -73,12 +76,20 @@ async def run(cfg: Config, args: argparse.Namespace) -> int:
 
         tasks.append(asyncio.create_task(_timer(), name="record-timer"))
 
+    ui: UiServer | None = None
+    if not args.no_ui:
+        ui = UiServer(cfg, engine, feed, db)
+        tasks += await ui.start()
+
     status_task = asyncio.create_task(_status_loop(engine, feed), name="status")
 
     await stop.wait()
     log.info("shutting down")
     if feed is not None:
         feed.stop()
+    if ui is not None:
+        ui.request_stop()
+    await asyncio.sleep(0.2)  # let uvicorn begin its graceful exit
     for t in tasks:
         t.cancel()
     status_task.cancel()
@@ -86,6 +97,7 @@ async def run(cfg: Config, args: argparse.Namespace) -> int:
     if recorder is not None:
         recorder.close()
         log.info("recording flushed: %s", recorder.path)
+    db.close()
     st = engine.status()
     log.info(
         "session summary: %s events (%s ticks) in %.1fs",
@@ -113,6 +125,7 @@ def cli(argv: list[str] | None = None) -> int:
                         help="replay a recorded ndjson file instead of connecting live")
     parser.add_argument("--speed", type=float, default=1.0,
                         help="replay speed multiplier (0 = as fast as possible)")
+    parser.add_argument("--no-ui", action="store_true", help="run headless (no dashboard)")
     args = parser.parse_args(argv)
 
     cfg = load_config(args.config)

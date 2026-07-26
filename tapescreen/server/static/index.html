@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TapeScreen</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<header id="topbar">
+  <div id="brand">Tape<span>Screen</span></div>
+  <nav id="tabs">
+    <button class="tab active" data-tab="screen">Screen</button>
+    <button class="tab" data-tab="stats">Stats</button>
+  </nav>
+  <div id="statusbar">
+    <span class="st" id="st-conn"><i class="dot"></i><b>feed</b></span>
+    <span class="st" title="messages per second"><b id="st-rate">0</b> msg/s</span>
+    <span class="st" title="exchange->receive latency incl. clock skew">ingest <b id="st-ingest">–</b></span>
+    <span class="st" title="tick->UI push latency (monotonic clock)">tick→ui <b id="st-pipe">–</b></span>
+    <span class="st" title="dropped/unroutable messages">drops <b id="st-drops">0</b></span>
+    <span class="st">up <b id="st-uptime">0s</b></span>
+    <button id="sound-toggle" title="ALERT-tier sound + browser notification">🔇</button>
+  </div>
+</header>
+
+<main id="view-screen">
+  <section id="grid-wrap">
+    <table id="grid">
+      <thead>
+        <tr>
+          <th>sym</th><th>price</th><th>1m%</th><th>5m%</th><th>15m%</th>
+          <th title="volume z-score vs trailing 30-min">vol z</th>
+          <th title="cumulative volume delta, 5-min window">cvd 5m</th>
+          <th title="top-10 depth imbalance (bid share)">book</th>
+          <th title="spread, basis points">spr</th>
+          <th title="funding rate (hourly); ring = 7d percentile">fund</th>
+          <th title="open-interest change over 5 min">Δoi 5m</th>
+          <th class="score">L</th><th class="score">S</th>
+        </tr>
+      </thead>
+      <tbody id="grid-body"></tbody>
+    </table>
+  </section>
+
+  <aside id="feed-panel">
+    <div id="feed-head">
+      <h2>signals</h2>
+      <select id="f-symbol"><option value="">all symbols</option></select>
+      <select id="f-tier">
+        <option value="">all tiers</option>
+        <option>ALERT</option><option>WATCH</option><option>INFO</option>
+      </select>
+      <select id="f-rule"><option value="">all rules</option></select>
+    </div>
+    <ol id="feed-list" reversed></ol>
+  </aside>
+</main>
+
+<main id="view-stats" hidden>
+  <div id="stats-wrap">
+    <div id="stats-totals"></div>
+    <h2>by rule</h2><div id="stats-rule"></div>
+    <h2>by symbol</h2><div id="stats-symbol"></div>
+    <p class="note">hit = signed forward return &gt; spread haircut. Signal quality is measured here, not assumed.</p>
+  </div>
+</main>
+
+<div id="drawer" hidden>
+  <div id="drawer-head">
+    <h2 id="drawer-sym"></h2>
+    <div id="drawer-tf">
+      <button class="tf active" data-tf="1s">1s</button>
+      <button class="tf" data-tf="1m">1m</button>
+    </div>
+    <span id="drawer-vwap" class="note"></span>
+    <button id="drawer-close">✕</button>
+  </div>
+  <div id="chart-price"></div>
+  <div id="chart-cvd"></div>
+</div>
+
+<div id="disconnect-banner" hidden>connection to tapescreen lost — retrying…</div>
+
+<script src="/static/lightweight-charts.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>
