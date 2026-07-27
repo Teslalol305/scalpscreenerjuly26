@@ -94,6 +94,23 @@ stats:
   horizons_s: [30, 60, 180, 300]
   mfe_mae_window_s: 300
 
+# Trade-signal ledger + self-learning confidence (screener only - no orders).
+learning:
+  enabled: true
+  prior_wins: 3.0               # Beta prior: confidence starts at 50% and
+  prior_losses: 3.0             #   moves only as real outcomes accumulate
+  min_bucket_n: 20              # rule+symbol bucket needs this many samples,
+                                #   else confidence backs off to the rule bucket
+  weight_mult_min: 0.6          # learned composite-weight multiplier bounds
+  weight_mult_max: 1.4
+  weight_min_n: 10              # rule needs this many resolutions before its
+                                #   composite weight is adjusted at all
+  stop_atr_min: 0.35            # stop distance clamp, in ATR(1m) multiples
+  stop_atr_max: 1.5
+  target_r: 1.0                 # symmetric 1R target: win-rate maps to edge
+  max_hold_s: 300               # TIME exit at the outcome horizon
+  one_per_side: true            # one active signal per (symbol, side)
+
 db:
   path: data/tapescreen.db
 

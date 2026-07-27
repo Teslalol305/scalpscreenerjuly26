@@ -15,6 +15,7 @@ from tapescreen.core.events import Bbo, BookTop, Event, FeedStatus, PerpCtx, Tic
 from tapescreen.core.features import FeatureEngine, FeatureSnapshot
 from tapescreen.core.signals.base import SignalEvent
 from tapescreen.core.signals.composite import Composite
+from tapescreen.core.signals.ledger import SignalLedger
 from tapescreen.core.state import SymbolState
 from tapescreen.store.db import Db
 from tapescreen.store.outcomes import OutcomeTracker
@@ -51,12 +52,17 @@ class Engine:
         self.features: dict[str, FeatureEngine] = {
             sym: FeatureEngine(st) for sym, st in self.states.items()
         }
-        self.composites: dict[str, Composite] = {sym: Composite(cfg, sym) for sym in cfg.symbols}
+        self.ledger = SignalLedger(cfg, db)
+        self.composites: dict[str, Composite] = {
+            sym: Composite(cfg, sym, weight_mult=self.ledger.rule_multiplier)
+            for sym in cfg.symbols
+        }
         self.flags: dict[str, dict] = {sym: {} for sym in cfg.symbols}
         self.outcomes = OutcomeTracker(cfg, db)
         self.signal_feed: deque[dict] = deque(maxlen=500)  # newest last; UI reverses
         self.signals_total = 0
         self._signal_listeners: list = []  # callables(dict) for immediate UI push
+        self._trade_listeners: list = []  # callables(kind, dict) for entry/exit pushes
         self._funding_persist_ts: dict[str, float] = {sym: 0.0 for sym in cfg.symbols}
         for sym, st in self.states.items():
             st.on_bar_1s.append(self._make_signal_hook(sym))
@@ -76,6 +82,13 @@ class Engine:
 
     def add_signal_listener(self, cb) -> None:
         self._signal_listeners.append(cb)
+
+    def add_trade_listener(self, cb) -> None:
+        self._trade_listeners.append(cb)
+
+    def _emit_trade(self, kind: str, payload: dict) -> None:
+        for cb in self._trade_listeners:
+            cb(kind, payload)
 
     def _make_signal_hook(self, sym: str):
         comp = self.composites[sym]
@@ -101,6 +114,11 @@ class Engine:
         self.signal_feed.append(row)
         for cb in self._signal_listeners:
             cb(row)
+        # open a tracked trade signal (entry) for directional fires
+        ev.snapshot["_db_id"] = sid
+        trade = self.ledger.on_rule_fire(ev, self.features[ev.symbol].snapshot)
+        if trade is not None:
+            self._emit_trade("entry", trade.to_dict())
 
     def snapshot(self, symbol: str) -> FeatureSnapshot:
         return self.features[symbol].snapshot
@@ -115,6 +133,8 @@ class Engine:
             self.last_any_ts[ev.symbol] = ev.ts_recv
             self.states[ev.symbol].on_event(ev)
             self.outcomes.on_tick(ev)
+            for exited in self.ledger.on_tick(ev):
+                self._emit_trade("exit", exited.to_dict())
         elif isinstance(ev, (BookTop, Bbo)):
             self.last_any_ts[ev.symbol] = ev.ts_recv
             self.states[ev.symbol].on_event(ev)

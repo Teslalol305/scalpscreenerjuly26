@@ -21,40 +21,43 @@
     <span class="st" title="tick->UI push latency (monotonic clock)">tick→ui <b id="st-pipe">–</b></span>
     <span class="st" title="dropped/unroutable messages">drops <b id="st-drops">0</b></span>
     <span class="st">up <b id="st-uptime">0s</b></span>
-    <button id="sound-toggle" title="ALERT-tier sound + browser notification">🔇</button>
+    <button id="sound-toggle" title="sound on entries; double-beep on ALERT tier">🔇</button>
   </div>
 </header>
 
 <main id="view-screen">
-  <section id="grid-wrap">
-    <table id="grid">
-      <thead>
-        <tr>
-          <th>sym</th><th>price</th><th>1m%</th><th>5m%</th><th>15m%</th>
-          <th title="volume z-score vs trailing 30-min">vol z</th>
-          <th title="cumulative volume delta, 5-min window">cvd 5m</th>
-          <th title="top-10 depth imbalance (bid share)">book</th>
-          <th title="spread, basis points">spr</th>
-          <th title="funding rate (hourly); ring = 7d percentile">fund</th>
-          <th title="open-interest change over 5 min">Δoi 5m</th>
-          <th class="score">L</th><th class="score">S</th>
-        </tr>
-      </thead>
-      <tbody id="grid-body"></tbody>
-    </table>
+  <section id="left-pane">
+    <div id="grid-wrap">
+      <table id="grid">
+        <thead>
+          <tr>
+            <th>sym</th><th>price</th><th>1m%</th><th>5m%</th><th>15m%</th>
+            <th title="volume z-score vs trailing 30-min">vol z</th>
+            <th title="cumulative volume delta, 5-min window">cvd 5m</th>
+            <th title="top-10 depth imbalance (bid share)">book</th>
+            <th title="spread, basis points">spr</th>
+            <th title="funding rate (hourly); ring = 7d percentile">fund</th>
+            <th title="open-interest change over 5 min">Δoi 5m</th>
+            <th class="score">L</th><th class="score">S</th>
+          </tr>
+        </thead>
+        <tbody id="grid-body"></tbody>
+      </table>
+    </div>
+    <div id="learn-strip">
+      <div id="learn-title" title="measured win rate per rule; weight = learned composite multiplier">LEARNING · win rates</div>
+      <div id="learn-meters"></div>
+    </div>
   </section>
 
-  <aside id="feed-panel">
-    <div id="feed-head">
-      <h2>signals</h2>
-      <select id="f-symbol"><option value="">all symbols</option></select>
-      <select id="f-tier">
-        <option value="">all tiers</option>
-        <option>ALERT</option><option>WATCH</option><option>INFO</option>
-      </select>
-      <select id="f-rule"><option value="">all rules</option></select>
+  <aside id="board-pane">
+    <div id="board-head">
+      <h2>ACTIVE SIGNALS</h2>
+      <span id="board-count" class="note"></span>
     </div>
-    <ol id="feed-list" reversed></ol>
+    <div id="board-cards"><div id="board-empty">no active signals — rules armed</div></div>
+    <div id="ticker-head"><h2>RESOLVED</h2><span id="ticker-tally" class="note"></span></div>
+    <ol id="ticker"></ol>
   </aside>
 </main>
 

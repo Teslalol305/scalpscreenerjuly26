@@ -43,6 +43,18 @@ validated at startup with errors that name the offending key.
 
 ## What you see
 
+- **Active signals board** (right pane, the glance surface) — every directional rule
+  fire opens a tracked trade signal: big LONG/SHORT card with entry, stop (the
+  rule's invalidation level, ATR-bounded), symmetric 1R target, live R, an age bar
+  to the 5-minute horizon, and a **confidence %** — the Beta-posterior win
+  probability of that rule (and rule×symbol once n ≥ 20), learned from every
+  resolved outcome in the DB. Exits fire explicitly: TARGET / STOP / TIME, and land
+  in the **resolved ticker** as WIN/LOSS chips with the R result.
+- **Learning strip** (bottom) — per-rule measured win rate, sample count, posterior
+  confidence, and the learned composite-weight multiplier (2×P clamped to
+  [0.6, 1.4], active only after 10 resolutions). Rules that win get louder;
+  rules that lose fade — transparently, no black box.
+
 - **Main grid** — one row per symbol: price (tick-flash), Δ% 1m/5m/15m, volume
   z-score, CVD 5m sparkline, top-10 book-imbalance bar, spread (bps), funding badge
   (bold when at a 7-day extreme, hover for percentile), ΔOI 5m, and heat-colored

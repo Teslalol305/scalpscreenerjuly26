@@ -50,6 +50,25 @@ CREATE TABLE IF NOT EXISTS funding_history (
     rate   REAL NOT NULL,
     PRIMARY KEY (symbol, ts)
 );
+CREATE TABLE IF NOT EXISTS trade_signals (
+    id          INTEGER PRIMARY KEY,
+    signal_id   INTEGER REFERENCES signals(id),
+    ts          REAL NOT NULL,
+    symbol      TEXT NOT NULL,
+    side        TEXT NOT NULL,
+    rule        TEXT NOT NULL,
+    tier        TEXT NOT NULL,
+    confidence  REAL NOT NULL,
+    entry       REAL NOT NULL,
+    stop        REAL NOT NULL,
+    target      REAL NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'open',  -- open | win | loss
+    exit_ts     REAL,
+    exit_price  REAL,
+    exit_reason TEXT,                          -- TARGET | STOP | TIME
+    r_result    REAL
+);
+CREATE INDEX IF NOT EXISTS idx_trade_signals_ts ON trade_signals(ts);
 """
 
 _SENTINEL: Any = object()
@@ -107,6 +126,55 @@ class Db:
             "INSERT OR IGNORE INTO funding_history (symbol, ts, rate) VALUES (?,?,?)",
             (symbol, ts, rate),
         )
+
+    def insert_trade_signal(self, tid: int, signal_id: int, ts: float, symbol: str,
+                            side: str, rule: str, tier: str, confidence: float,
+                            entry: float, stop: float, target: float) -> None:
+        self._submit(
+            "INSERT INTO trade_signals (id, signal_id, ts, symbol, side, rule, tier,"
+            " confidence, entry, stop, target) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (tid, signal_id, ts, symbol, side, rule, tier, confidence, entry, stop, target),
+        )
+
+    def close_trade_signal(self, tid: int, status: str, exit_ts: float, exit_price: float,
+                           exit_reason: str, r_result: float) -> None:
+        self._submit(
+            "UPDATE trade_signals SET status=?, exit_ts=?, exit_price=?, exit_reason=?,"
+            " r_result=? WHERE id=?",
+            (status, exit_ts, exit_price, exit_reason, r_result, tid),
+        )
+
+    def next_trade_signal_id(self) -> int:
+        with self.read_conn() as conn:
+            row = conn.execute("SELECT COALESCE(MAX(id), 0) FROM trade_signals").fetchone()
+        return int(row[0]) + 1
+
+    def learning_buckets(self, haircut_bps: float) -> list[dict[str, Any]]:
+        """(rule, symbol, wins, n) from resolved trade signals PLUS the legacy
+        outcomes table (ret_5m vs haircut), so learning bootstraps from every
+        outcome ever measured, not just post-upgrade trades."""
+        h = haircut_bps / 1e4
+        sql = f"""
+            SELECT rule, symbol, SUM(win) AS wins, COUNT(*) AS n FROM (
+                SELECT rule, symbol, (status = 'win') AS win
+                  FROM trade_signals WHERE status IN ('win', 'loss')
+                UNION ALL
+                SELECT s.rule, s.symbol, (o.ret_5m > {h}) AS win
+                  FROM signals s JOIN outcomes o ON o.signal_id = s.id
+                 WHERE o.ret_5m IS NOT NULL
+                   AND s.id NOT IN (SELECT signal_id FROM trade_signals
+                                    WHERE signal_id IS NOT NULL)
+            ) GROUP BY rule, symbol
+        """
+        with self.read_conn() as conn:
+            return [dict(r) for r in conn.execute(sql).fetchall()]
+
+    def recent_trade_signals(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self.read_conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM trade_signals ORDER BY ts DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     def _submit(self, sql: str, params: tuple) -> None:
         try:

@@ -78,6 +78,22 @@ class StatsConfig:
 
 
 @dataclass(slots=True)
+class LearningConfig:
+    enabled: bool
+    prior_wins: float
+    prior_losses: float
+    min_bucket_n: int
+    weight_mult_min: float
+    weight_mult_max: float
+    weight_min_n: int
+    stop_atr_min: float
+    stop_atr_max: float
+    target_r: float
+    max_hold_s: float
+    one_per_side: bool
+
+
+@dataclass(slots=True)
 class Config:
     port: int
     sound_default: bool
@@ -92,6 +108,7 @@ class Config:
     rules: dict[str, dict[str, Any]]
     composite: CompositeConfig
     stats: StatsConfig
+    learning: LearningConfig
     db_path: str
     log_path: str
     feed_debug: bool
@@ -251,6 +268,20 @@ def load_config(path: str | Path = "config.yaml") -> Config:
             spread_haircut_bps=_num(doc, "stats.spread_haircut_bps", 0),
             horizons_s=list(horizons),
             mfe_mae_window_s=_int(doc, "stats.mfe_mae_window_s", 30),
+        ),
+        learning=LearningConfig(
+            enabled=_bool(doc, "learning.enabled"),
+            prior_wins=_num(doc, "learning.prior_wins", 0),
+            prior_losses=_num(doc, "learning.prior_losses", 0),
+            min_bucket_n=_int(doc, "learning.min_bucket_n", 1),
+            weight_mult_min=_num(doc, "learning.weight_mult_min", 0.1),
+            weight_mult_max=_num(doc, "learning.weight_mult_max", 0.1),
+            weight_min_n=_int(doc, "learning.weight_min_n", 1),
+            stop_atr_min=_num(doc, "learning.stop_atr_min", 0.05),
+            stop_atr_max=_num(doc, "learning.stop_atr_max", 0.05),
+            target_r=_num(doc, "learning.target_r", 0.1),
+            max_hold_s=_num(doc, "learning.max_hold_s", 30),
+            one_per_side=_bool(doc, "learning.one_per_side"),
         ),
         db_path=_str(doc, "db.path"),
         log_path=_str(doc, "logging.path"),

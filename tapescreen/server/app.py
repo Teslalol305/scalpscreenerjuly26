@@ -57,6 +57,7 @@ class UiServer:
         self.app = self._build_app()
         self._uv: uvicorn.Server | None = None
         engine.add_signal_listener(self._on_signal)
+        engine.add_trade_listener(self._on_trade)
         self._signal_out: asyncio.Queue = asyncio.Queue(maxsize=1000)
 
     # ------------------------------------------------------------------ fastapi
@@ -116,6 +117,11 @@ class UiServer:
             "alert_score": self.cfg.composite.alert_score,
             "stale_s": self.cfg.symbol_stale_s,
             "recent_signals": list(self.engine.signal_feed)[-100:],
+            "board": {
+                "active": self.engine.ledger.active(),
+                "resolved": self.engine.ledger.resolved_recent[-20:][::-1],
+                "learning": self.engine.ledger.learning_snapshot(),
+            },
         }
 
     def _row(self, sym: str, now: float) -> dict[str, Any]:
@@ -161,7 +167,13 @@ class UiServer:
         st["pipeline_latency_p95_ms"] = round(percentile(lat, 95) * 1000, 1)
         st["msg_rate"] = round(self.msg_rate, 1)
         st["feed_health"] = feed_health
-        return {"type": "grid", "ts": now, "rows": rows, "status": st}
+        led = self.engine.ledger
+        board = {
+            "active": led.active(),
+            "resolved": led.resolved_recent[-20:][::-1],
+            "learning": led.learning_snapshot(),
+        }
+        return {"type": "grid", "ts": now, "rows": rows, "status": st, "board": board}
 
     def _candles(self, sym: str) -> dict[str, Any]:
         if sym not in self.engine.states:
@@ -195,7 +207,11 @@ class UiServer:
 
     def _on_signal(self, row: dict[str, Any]) -> None:
         with contextlib.suppress(asyncio.QueueFull):
-            self._signal_out.put_nowait(row)
+            self._signal_out.put_nowait({"type": "signal", "row": row})
+
+    def _on_trade(self, kind: str, payload: dict[str, Any]) -> None:
+        with contextlib.suppress(asyncio.QueueFull):
+            self._signal_out.put_nowait({"type": kind, "trade": payload})
 
     async def _broadcast(self, text: str) -> None:
         dead = []
@@ -213,10 +229,10 @@ class UiServer:
         while True:
             await asyncio.sleep(interval)
             try:
-                # forward any signals that arrived since the last cycle, immediately
+                # forward signals/entries/exits that arrived since last cycle, immediately
                 while not self._signal_out.empty():
-                    row = self._signal_out.get_nowait()
-                    await self._broadcast(json.dumps({"type": "signal", "row": row}))
+                    msg = self._signal_out.get_nowait()
+                    await self._broadcast(json.dumps(msg))
                 if live:
                     now_mono = time.perf_counter()
                     monos = self.engine.tick_monos

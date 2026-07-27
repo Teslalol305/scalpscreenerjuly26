@@ -36,11 +36,16 @@ class Fired:
 
 
 class Composite:
-    """Per-symbol: runs rules, applies cooldowns, maintains decayed side scores."""
+    """Per-symbol: runs rules, applies cooldowns, maintains decayed side scores.
 
-    def __init__(self, cfg: Config, symbol: str) -> None:
+    ``weight_mult(rule_name)`` lets the learning layer scale rule weights by
+    measured win probability (bounded upstream); defaults to 1.0 for all rules.
+    """
+
+    def __init__(self, cfg: Config, symbol: str, weight_mult=None) -> None:
         self.cfg = cfg
         self.symbol = symbol
+        self.weight_mult = weight_mult or (lambda _rule: 1.0)
         self.rules = [cls(cfg, symbol) for cls in RULE_REGISTRY.values()]
         self.last_fire: dict[str, float] = {}  # rule name -> ts (per-symbol+rule cooldown)
         self.last_alert: dict[str, float] = {LONG: -1e18, SHORT: -1e18}
@@ -93,7 +98,7 @@ class Composite:
                 del self.active[name]
                 continue
             if f.side in raw:
-                raw[f.side] += f.weight * f.strength * decay
+                raw[f.side] += f.weight * self.weight_mult(name) * f.strength * decay
 
         oi_mult = float(self.cfg.rules["oi_compression"].get("weight_mult", 1.0))
         f_al = float(self.cfg.rules["funding_extremity"].get("weight_mult_aligned", 1.0))
