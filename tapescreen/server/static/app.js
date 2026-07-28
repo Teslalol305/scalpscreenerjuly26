@@ -1,5 +1,6 @@
-/* TapeScreen frontend v2: glance-first board of entry/exit signals with learned
-   confidence, plus the symbol grid, drawer, and stats. Vanilla JS, no build step. */
+/* TapeScreen frontend v5: conviction-scaled signal cards (ring + trade gauge +
+   entry ladder), labeled market grid, learning meters, help overlay.
+   Vanilla JS, no build step. Gauge/ring positions are R-space, animated via CSS. */
 "use strict";
 
 const $ = (id) => document.getElementById(id);
@@ -9,12 +10,13 @@ const ticker = $("ticker");
 
 const state = {
   symbols: [],
-  rows: new Map(),        // sym -> {tr, cells, spark: [], sparkTs: 0, lastPrice: 0}
-  cards: new Map(),       // trade id -> card element
+  rows: new Map(),
+  cards: new Map(),       // trade id -> {el, refs}
   tally: { win: 0, loss: 0 },
   soundOn: false,
   alertScore: 80,
   watchScore: 60,
+  maxHold: 7200,
   drawer: { sym: null, tf: "1s", timer: null, charts: null },
   ws: null,
   wsRetry: 1000,
@@ -38,9 +40,16 @@ function fmtUptime(s) {
   if (s < 5400) return Math.round(s / 60) + "m";
   return (s / 3600).toFixed(1) + "h";
 }
-function shortRule(r) { return r.replace("_ignition", "").replace("_imbalance", " imb").replace("_", " "); }
+function fmtHold(s) {
+  const m = Math.floor(s / 60), sec = Math.floor(s % 60);
+  return `${m}:${String(sec).padStart(2, "0")}`;
+}
+function shortRule(r) {
+  return r.replace("_ignition", "").replace("book_imbalance", "book imb")
+    .replace("_", " ");
+}
 
-/* ---------------- grid ---------------- */
+/* ---------------- market grid ---------------- */
 
 const COLS = ["price", "pct1", "pct5", "pct15", "volz", "cvd", "imb", "spr", "fund", "doi", "sl", "ss"];
 
@@ -58,15 +67,15 @@ function buildRow(sym) {
     tr.appendChild(td);
     cells[c] = td;
   }
-  cells.cvd.innerHTML = `<canvas class="spark" width="90" height="22"></canvas>`;
-  cells.imb.innerHTML = `<span class="imb-bar"><i class="b"></i><i class="a"></i></span><span class="imb-txt"></span>`;
-  // persistent nodes: rebuilding these via innerHTML every push would reset the
-  // browser's hover-tooltip timer, so the 7d-percentile title could never show
+  cells.cvd.innerHTML = `<canvas class="spark" width="92" height="24"></canvas>`;
+  cells.imb.innerHTML = `<span class="imb-wrap"><span class="imb-bar"><i class="b"></i><i class="a"></i></span><span class="imb-txt"></span></span>`;
   cells.fund.innerHTML = `<span class="fund-badge"></span>`;
   cells.fundBadge = cells.fund.querySelector(".fund-badge");
   for (const c of ["sl", "ss"]) {
-    cells[c].innerHTML = `<span class="scorecell"></span>`;
-    cells[c + "Span"] = cells[c].querySelector(".scorecell");
+    cells[c].innerHTML = `<span class="scorecell"><b></b><span class="sc-bar"><i></i></span></span>`;
+    cells[c + "Cell"] = cells[c].querySelector(".scorecell");
+    cells[c + "Num"] = cells[c].querySelector("b");
+    cells[c + "Bar"] = cells[c].querySelector(".sc-bar i");
   }
   tr.addEventListener("click", () => openDrawer(sym));
   gridBody.appendChild(tr);
@@ -75,7 +84,7 @@ function buildRow(sym) {
 
 function flash(td, dir) {
   td.classList.remove("flash-up", "flash-dn");
-  void td.offsetWidth; // restart animation
+  void td.offsetWidth;
   td.classList.add(dir > 0 ? "flash-up" : "flash-dn");
   td.addEventListener("animationend", () => td.classList.remove("flash-up", "flash-dn"),
     { once: true });
@@ -95,13 +104,14 @@ function drawSpark(canvas, data) {
     i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
   });
   ctx.strokeStyle = data[data.length - 1] >= data[0] ? "#26a69a" : "#ef5350";
-  ctx.lineWidth = 1.5;
+  ctx.lineWidth = 1.6;
   ctx.stroke();
 }
 
-function scoreBg(score, isLong) {
-  const a = Math.min(1, score / 100) * 0.55;
-  return isLong ? `rgba(38,166,154,${a})` : `rgba(239,83,80,${a})`;
+function scoreColor(score) {
+  if (score >= state.alertScore) return "var(--dn)";
+  if (score >= state.watchScore) return "var(--watch)";
+  return "var(--accent)";
 }
 
 function updateRow(sym, r, now) {
@@ -109,19 +119,20 @@ function updateRow(sym, r, now) {
   if (!row) return;
   const { cells, tr } = row;
   tr.classList.toggle("stale", !!r.stale);
+  tr.classList.toggle("qtn-row", !!r.quarantined);
 
   if (r.price !== row.lastPrice && row.lastPrice > 0) flash(cells.price, r.price - row.lastPrice);
   row.lastPrice = r.price;
   cells.price.textContent = fmtPrice(r.price);
 
-  cells.pct1.textContent = fmtPct(r.pct_1m);
-  cells.pct1.className = "c-pct1 " + pctClass(r.pct_1m / 100);
-  cells.pct5.textContent = fmtPct(r.pct_5m);
-  cells.pct5.className = "c-pct5 " + pctClass(r.pct_5m / 100);
-  cells.pct15.textContent = fmtPct(r.pct_15m);
-  cells.pct15.className = "c-pct15 " + pctClass(r.pct_15m / 100);
+  for (const [cell, v] of [[cells.pct1, r.pct_1m], [cells.pct5, r.pct_5m], [cells.pct15, r.pct_15m]]) {
+    cell.textContent = fmtPct(v);
+    cell.className = cell.className.replace(/ ?num-(up|dn)/g, "") + " " +
+      pctClass(v / 100);
+  }
   cells.volz.textContent = r.vol_z.toFixed(1);
-  cells.volz.style.fontWeight = Math.abs(r.vol_z) >= 2.5 ? "700" : "400";
+  cells.volz.style.fontWeight = Math.abs(r.vol_z) >= 2.5 ? "800" : "400";
+  cells.volz.style.color = Math.abs(r.vol_z) >= 2.5 ? "var(--watch)" : "";
 
   if (now - row.sparkTs >= 1) {
     row.sparkTs = now;
@@ -130,32 +141,35 @@ function updateRow(sym, r, now) {
     drawSpark(cells.cvd.querySelector("canvas"), row.spark);
   }
 
-  const bid = Math.round(r.imb * 74);
+  const bid = Math.round(r.imb * 62);
   const bar = cells.imb.querySelector(".imb-bar");
   bar.querySelector(".b").style.width = bid + "px";
-  bar.querySelector(".a").style.width = (74 - bid) + "px";
+  bar.querySelector(".a").style.width = (62 - bid) + "px";
   cells.imb.querySelector(".imb-txt").textContent = r.imb.toFixed(2);
 
   cells.spr.textContent = r.spread_bps.toFixed(1);
   const badge = cells.fundBadge;
-  badge.textContent = `${fmtSigned(r.funding * 1e4, 2)}bp`;
+  badge.textContent = `${fmtSigned(r.funding * 1e4, 2)}`;
   badge.className = `fund-badge ${r.funding_bias ? "hot" : ""}`;
-  badge.title = `7d pctl ${r.funding_pctl}${r.funding_bias ? " · crowded, bias " + r.funding_bias : ""}`;
+  badge.title = `hourly funding · 7-day percentile ${r.funding_pctl}` +
+    (r.funding_bias ? ` · crowded, fade bias: ${r.funding_bias}` : "");
   cells.doi.textContent = fmtSigned(r.doi_5m, Math.abs(r.doi_5m) >= 100 ? 0 : 2);
 
-  for (const [span, score, isLong] of [[cells.slSpan, r.score_long, true], [cells.ssSpan, r.score_short, false]]) {
+  for (const [k, score] of [["sl", r.score_long], ["ss", r.score_short]]) {
     const tier = score >= state.alertScore ? "alert" : score >= state.watchScore ? "watch" : "";
-    span.className = `scorecell ${tier}`;
-    span.style.background = scoreBg(score, isLong);
-    span.textContent = Math.round(score);
+    cells[k + "Cell"].className = `scorecell ${tier}`;
+    cells[k + "Num"].textContent = Math.round(score);
+    const bar2 = cells[k + "Bar"];
+    bar2.style.width = Math.min(100, score) + "%";
+    bar2.style.background = scoreColor(score);
   }
 
   let badges = "";
-  if (r.unavailable) badges += `<span class="badge-stale" title="not tradable on the venue">n/a</span>`;
-  if (r.quarantined) badges += `<span class="badge-qtn" title="failing data audits — signal entries suspended until checks pass">qtn</span>`;
-  if (r.warming) badges += `<span class="badge-warm" title="baselines still warming">warm</span>`;
-  if (r.stale && !r.unavailable) badges += `<span class="badge-stale">stale</span>`;
-  if (r.oi_compression) badges += `<span class="badge-oi" title="OI building while price flat">OI</span>`;
+  if (r.unavailable) badges += `<span class="badge badge-stale" title="not tradable on the venue">n/a</span>`;
+  if (r.quarantined) badges += `<span class="badge badge-qtn" title="failing data self-audits — signals suspended">qtn</span>`;
+  if (r.warming) badges += `<span class="badge badge-warm" title="statistics warming up (~30 min) — no signals yet">warm</span>`;
+  if (r.stale && !r.unavailable) badges += `<span class="badge badge-stale" title="no trades for 30s">stale</span>`;
+  if (r.oi_compression) badges += `<span class="badge badge-oi" title="open interest building while price sits still">OI</span>`;
   if (cells.badges.innerHTML !== badges) cells.badges.innerHTML = badges;
   row.sortKey = Math.max(r.score_long, r.score_short);
 }
@@ -164,83 +178,136 @@ let lastOrder = "";
 function resortGrid() {
   const rows = [...state.rows.values()].sort((a, b) => (b.sortKey || 0) - (a.sortKey || 0));
   const order = rows.map((r) => r.tr.dataset.sym).join(",");
-  if (order === lastOrder) return; // re-appending restarts CSS animations; skip when unchanged
+  if (order === lastOrder) return;
   lastOrder = order;
   rows.forEach((r) => gridBody.appendChild(r.tr));
 }
 
-/* ---------------- active signals board ---------------- */
+/* ---------------- signal cards ---------------- */
 
-function confClass(pct) { return pct >= 58 ? "conf-hi" : pct <= 45 ? "conf-lo" : ""; }
+// gauge maps R to x%: display window is -1.5R .. +3R (entry sits at 33.3%)
+function rToPct(r) {
+  return Math.max(1, Math.min(99, ((r + 1.5) / 4.5) * 100));
+}
+function convTier(conf) { return conf >= 58 ? "conv-hi" : conf >= 48 ? "conv-mid" : "conv-lo"; }
+function ringSize(tier) { return tier === "conv-hi" ? 58 : tier === "conv-mid" ? 48 : 40; }
 
-function cardHtml(t) {
-  const conf = t.confidence;
-  const src = t.conf_src === "model" ? "model" : "history";
-  return `
+function buildCard(t, fresh) {
+  const tier = convTier(t.confidence);
+  const size = ringSize(tier);
+  const r = size / 2 - 4, C = (2 * Math.PI * r).toFixed(2);
+  const el = document.createElement("div");
+  el.className = `card ${t.side} ${tier} ${fresh ? "enter" : ""}`;
+  el.dataset.id = t.id;
+  const src = t.conf_src === "model" ? "ml model" : "history";
+  el.innerHTML = `
     <div class="r1">
       <span class="side-pill ${t.side}">${t.side.toUpperCase()}</span>
       <span class="sym">${t.symbol}</span>
       <span class="tierchip ${t.tier}">${t.tier}</span>
       <span class="rule">${shortRule(t.rule)}</span>
-      <span class="conf ${confClass(conf)}"><div class="pct">${Math.round(conf)}%</div>
-        <div class="n">${src} · n=${t.conf_n}</div></span>
+      <span class="conf">
+        <span class="conf-label"><b>WIN PROBABILITY</b><span>${src} · n=${t.conf_n}</span></span>
+        <span class="conf-wrap" style="width:${size}px;height:${size}px">
+          <svg class="conf-ring" width="${size}" height="${size}">
+            <circle class="bgc" cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke-width="4"/>
+            <circle class="fgc" cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke-width="4"
+              stroke-dasharray="${C}" stroke-dashoffset="${C}"/>
+          </svg><span class="conf-num">${Math.round(t.confidence)}%</span>
+        </span>
+      </span>
     </div>
-    <div class="ladder"></div>
-    <div class="r2">
-      <span class="kv"><span>avg entry</span><b class="v-avg"></b></span>
-      <span class="kv"><span>stop <i class="statechip"></i></span><b class="v-stop"></b></span>
-      <span class="kv"><span>banked</span><b class="v-banked"></b></span>
-      <span class="liveR"></span>
+    <div class="body">
+      <div class="ladder">
+        <span class="lad-t">ENTRY LADDER</span>
+        ${(t.levels || []).map((lv, i) =>
+          `<span class="lvl" data-i="${i}" title="scale-in level ${i + 1}"><i></i>E${i + 1} <b>${fmtPrice(lv.px)}</b></span>`).join("")}
+      </div>
+      <div class="gauge-zone">
+        <div class="gauge-top">
+          <span class="lad-t">TRADE GAUGE</span>
+          <span class="statechip"></span>
+          <span class="bankchip" title="profit already secured by the +1R partial"></span>
+          <span class="liveR" title="total open result, in R units" style="margin-left:auto"></span>
+        </div>
+        <div class="gauge">
+          <div class="track"></div>
+          <div class="mk mk-stop" title="stop"></div>
+          <div class="mk mk-entry" title="average entry"></div>
+          <div class="mk mk-price" title="live price"></div>
+        </div>
+        <div class="gauge-labels">
+          <span>stop <b class="g-stop"></b></span>
+          <span>entry <b class="g-entry"></b></span>
+          <span>+3R</span>
+        </div>
+      </div>
     </div>
-    <div class="age-bar"><i></i></div>`;
-}
-
-function makeCard(t, fresh) {
-  const el = document.createElement("div");
-  el.className = `card ${t.side} ${t.confidence >= 58 ? "hi-conf" : ""} ${fresh ? "enter" : ""}`;
-  el.dataset.id = t.id;
-  el.dataset.ts = t.ts;
-  el.innerHTML = cardHtml(t);
+    <div class="age">
+      <span class="age-bar"><i></i></span><span class="age-txt"></span>
+    </div>`;
   el.addEventListener("click", () => openDrawer(t.symbol));
-  return el;
+  const refs = {
+    fgc: el.querySelector(".fgc"), C: parseFloat(C),
+    num: el.querySelector(".conf-num"),
+    lvls: [...el.querySelectorAll(".lvl")],
+    statechip: el.querySelector(".statechip"),
+    bankchip: el.querySelector(".bankchip"),
+    liveR: el.querySelector(".liveR"),
+    mkStop: el.querySelector(".mk-stop"),
+    mkPrice: el.querySelector(".mk-price"),
+    gStop: el.querySelector(".g-stop"),
+    gEntry: el.querySelector(".g-entry"),
+    ageBar: el.querySelector(".age-bar i"),
+    ageTxt: el.querySelector(".age-txt"),
+  };
+  requestAnimationFrame(() => {  // let the ring animate from empty
+    refs.fgc.style.strokeDashoffset = (refs.C * (1 - t.confidence / 100)).toFixed(2);
+  });
+  return { el, refs };
 }
 
-function updateCardLive(el, t) {
-  // ladder: one chip per tranche, filled dots as adds trigger
-  const ladder = el.querySelector(".ladder");
-  const ladderHtml = (t.levels || []).map((lv, i) =>
-    `<span class="lvl ${lv.filled ? "filled" : ""}">E${i + 1} ${fmtPrice(lv.px)}</span>`
-  ).join("");
-  if (ladder.innerHTML !== ladderHtml) ladder.innerHTML = ladderHtml;
+function updateCard(entry, t) {
+  const { refs } = entry;
+  (t.levels || []).forEach((lv, i) => {
+    const el = refs.lvls[i];
+    if (el) el.classList.toggle("filled", !!lv.filled);
+  });
+  refs.gStop.textContent = fmtPrice(t.stop);
+  refs.gEntry.textContent = fmtPrice(t.avg_entry);
+  refs.statechip.textContent = t.state === "INIT" ? "" : t.state;
+  refs.statechip.className = "statechip st-" + t.state;
+  refs.statechip.title = t.state === "BE" ? "stop moved to break-even"
+    : t.state === "TRAIL" ? "trailing stop active, 1R behind best price" : "";
+  refs.bankchip.textContent = t.tp1_done ? `banked +${t.realized}R` : "";
+  refs.liveR.textContent = fmtSigned(t.live_r, 2) + "R";
+  refs.liveR.className = "liveR " +
+    (t.live_r > 0.05 ? "num-up" : t.live_r < -0.05 ? "num-dn" : "");
 
-  el.querySelector(".v-avg").textContent = fmtPrice(t.avg_entry);
-  el.querySelector(".v-stop").textContent = fmtPrice(t.stop);
-  const chip = el.querySelector(".statechip");
-  chip.textContent = t.state === "INIT" ? "" : t.state;
-  chip.className = "statechip st-" + t.state;
-  el.querySelector(".v-banked").textContent = t.tp1_done ? `+${t.realized}R` : "–";
+  const legR = t.leg_r ?? 0, stopR = t.stop_r ?? -1;
+  refs.mkStop.style.left = rToPct(stopR) + "%";
+  refs.mkPrice.style.left = rToPct(legR) + "%";
+  refs.mkPrice.className = "mk mk-price " + (legR > 0.05 ? "pos" : legR < -0.05 ? "neg" : "");
 
-  const lr = el.querySelector(".liveR");
-  lr.textContent = fmtSigned(t.live_r, 2) + "R";
-  lr.className = "liveR " + (t.live_r > 0.05 ? "num-up" : t.live_r < -0.05 ? "num-dn" : "");
-  const age = Math.min(1, (Date.now() / 1000 - t.ts) / (state.maxHold || 7200));
-  el.querySelector(".age-bar i").style.width = (age * 100).toFixed(0) + "%";
+  const age = Date.now() / 1000 - t.ts;
+  refs.ageBar.style.width = Math.min(100, age / state.maxHold * 100).toFixed(1) + "%";
+  refs.ageTxt.textContent = `${fmtHold(age)} / ${fmtHold(state.maxHold)}`;
 }
 
 function renderBoard(active) {
   const seen = new Set();
   for (const t of active) {
     seen.add(String(t.id));
-    let el = state.cards.get(String(t.id));
-    if (!el) {
-      el = makeCard(t, false);
-      state.cards.set(String(t.id), el);
-      boardCards.appendChild(el);
+    let entry = state.cards.get(String(t.id));
+    if (!entry) {
+      entry = buildCard(t, false);
+      state.cards.set(String(t.id), entry);
+      boardCards.appendChild(entry.el);
     }
-    updateCardLive(el, t);
+    updateCard(entry, t);
   }
-  for (const [id, el] of state.cards) {
-    if (!seen.has(id)) { el.remove(); state.cards.delete(id); }
+  for (const [id, entry] of state.cards) {
+    if (!seen.has(id)) { entry.el.remove(); state.cards.delete(id); }
   }
   $("board-empty").style.display = state.cards.size ? "none" : "block";
   $("board-count").textContent = state.cards.size ? `${state.cards.size} open` : "";
@@ -248,11 +315,12 @@ function renderBoard(active) {
 
 function onEntry(t) {
   if (!state.cards.has(String(t.id))) {
-    const el = makeCard(t, true);
-    state.cards.set(String(t.id), el);
-    boardCards.prepend(el);
-    updateCardLive(el, t);
+    const entry = buildCard(t, true);
+    state.cards.set(String(t.id), entry);
+    boardCards.prepend(entry.el);
+    updateCard(entry, t);
     $("board-empty").style.display = "none";
+    $("board-count").textContent = `${state.cards.size} open`;
   }
   if (state.soundOn) blip(660, 0.09);
   if (t.tier === "ALERT") alertUser(t);
@@ -262,24 +330,25 @@ function tickerLi(t, fresh) {
   const li = document.createElement("li");
   if (fresh) li.className = "fresh";
   const win = t.status === "win";
+  const why = { STOP: "stopped out", BE: "break-even stop", TRAIL: "trailing stop", TIME: "2h time limit" }[t.exit_reason] || t.exit_reason;
   li.innerHTML = `
     <span class="res-pill ${t.status}">${win ? "WIN" : "LOSS"}</span>
     <span class="r-val ${win ? "num-up" : "num-dn"}">${fmtSigned(t.r_result, 2)}R</span>
     <span class="sym">${t.symbol}</span>
     <span class="side-${t.side}">${t.side}</span>
-    <span class="why">${shortRule(t.rule)} · ${t.exit_reason}</span>
+    <span class="why">${shortRule(t.rule)} · ${why}</span>
     <span class="t">${fmtClock(t.exit_ts)}</span>`;
   return li;
 }
 
 function onExit(t) {
-  const el = state.cards.get(String(t.id));
-  if (el) { el.remove(); state.cards.delete(String(t.id)); }
+  const entry = state.cards.get(String(t.id));
+  if (entry) { entry.el.remove(); state.cards.delete(String(t.id)); }
   ticker.prepend(tickerLi(t, true));
   while (ticker.children.length > 40) ticker.lastChild.remove();
   state.tally[t.status] = (state.tally[t.status] || 0) + 1;
   const { win = 0, loss = 0 } = state.tally;
-  $("ticker-tally").textContent = `session W${win} · L${loss}`;
+  $("ticker-tally").textContent = `W ${win} · L ${loss}`;
   if (state.soundOn) blip(t.status === "win" ? 880 : 330, 0.12);
   $("board-empty").style.display = state.cards.size ? "none" : "block";
   $("board-count").textContent = state.cards.size ? `${state.cards.size} open` : "";
@@ -287,14 +356,21 @@ function onExit(t) {
 
 function renderLearning(learning) {
   const box = $("learn-meters");
-  if (!learning?.length) { box.innerHTML = "<span class='note'>no resolved signals yet — confidence at prior</span>"; return; }
-  box.innerHTML = learning.map((l) => `
-    <div class="meter" title="win rate over ${l.n} resolved signals · avg R = expectancy per trade · model trained on ${l.model_n}">
+  if (!learning?.length) {
+    box.innerHTML = "<span class='note'>no resolved signals yet — every strategy starts at 50% and must earn its confidence</span>";
+    return;
+  }
+  box.innerHTML = learning.map((l) => {
+    const wr = l.win_rate;
+    const col = wr == null ? "var(--ink-3)" : wr >= 55 ? "var(--up)" : wr >= 45 ? "var(--accent)" : "var(--dn)";
+    return `
+    <div class="meter" title="${l.n} resolved signals · avg ${l.avg_r ?? "?"}R per signal · score weight ×${l.weight_mult} · ML trained on ${l.model_n}">
       <div class="m-top"><span class="m-name">${shortRule(l.rule)}</span>
-        <span class="m-val">${l.win_rate == null ? "–" : l.win_rate + "%"}</span></div>
-      <div class="m-bar"><i style="width:${l.win_rate || 0}%"></i></div>
-      <div class="m-sub">n=${l.n} · ${l.avg_r == null ? "" : "avgR " + (l.avg_r > 0 ? "+" : "") + l.avg_r + " · "}w×${l.weight_mult} · ml:${l.model_n}</div>
-    </div>`).join("");
+        <span class="m-val" style="color:${col}">${wr == null ? "–" : wr + "%"}</span></div>
+      <div class="m-bar"><i style="width:${wr || 0}%;background:${col}"></i></div>
+      <div class="m-sub">n=${l.n}${l.avg_r == null ? "" : ` · ${l.avg_r > 0 ? "+" : ""}${l.avg_r}R avg`} · w×${l.weight_mult} · ml:${l.model_n}</div>
+    </div>`;
+  }).join("");
 }
 
 /* ---------------- status bar ---------------- */
@@ -311,8 +387,7 @@ function updateStatus(st) {
   $("st-drops").textContent = (fh.dropped_msgs || 0) + (fh.queue_drops || 0);
   $("st-uptime").textContent = fmtUptime(st.uptime_s || 0);
 
-  const au = $("st-audit"), a = st.audit;
-  const b = au.querySelector("b");
+  const au = $("st-audit"), a = st.audit, b = au.querySelector("b");
   if (!a) { b.textContent = "–"; au.title = "self-audit has not run yet"; }
   else if (a.ok) {
     b.textContent = "✓";
@@ -326,16 +401,16 @@ function updateStatus(st) {
   }
 }
 
-/* ---------------- alerts & sounds ---------------- */
+/* ---------------- sounds & alerts ---------------- */
 
 let audioCtx = null;
-function ctx() {
+function actx() {
   audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
-  if (audioCtx.state === "suspended") audioCtx.resume(); // ctx created w/o user gesture
+  if (audioCtx.state === "suspended") audioCtx.resume();
   return audioCtx;
 }
 function blip(freq, dur) {
-  const ac = ctx(), t0 = ac.currentTime;
+  const ac = actx(), t0 = ac.currentTime;
   const osc = ac.createOscillator(), g = ac.createGain();
   osc.frequency.value = freq;
   g.gain.setValueAtTime(0.10, t0);
@@ -350,7 +425,7 @@ function alertUser(t) {
   beep();
   if (Notification.permission === "granted") {
     new Notification(`TapeScreen ALERT · ${t.symbol} ${t.side}`, {
-      body: `${t.rule} · conf ${Math.round(t.confidence)}% @ ${fmtPrice(t.entry)}`,
+      body: `${t.rule} · win prob ${Math.round(t.confidence)}% @ ${fmtPrice(t.avg_entry || t.entry)}`,
       tag: `ts-${t.symbol}-${t.side}`,
     });
   }
@@ -361,7 +436,7 @@ function setSound(on, interactive) {
   $("sound-toggle").textContent = on ? "🔔" : "🔇";
   $("sound-toggle").classList.toggle("on", on);
   if (on && interactive) {
-    beep(); // audible confirmation only on a real user gesture
+    beep();
     if (Notification.permission === "default") Notification.requestPermission();
   }
 }
@@ -371,14 +446,25 @@ $("sound-toggle").addEventListener("click", () => {
   setSound(on, true);
 });
 
+/* ---------------- help overlay ---------------- */
+
+$("help-toggle").addEventListener("click", () => { $("help-overlay").hidden = false; });
+$("help-close").addEventListener("click", () => { $("help-overlay").hidden = true; });
+$("help-overlay").addEventListener("click", (e) => {
+  if (e.target === $("help-overlay")) $("help-overlay").hidden = true;
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") { $("help-overlay").hidden = true; closeDrawer(); }
+});
+
 /* ---------------- drawer (lightweight-charts) ---------------- */
 
 const CHART_OPTS = {
   autoSize: true,
-  layout: { background: { color: "#151a23" }, textColor: "#8a93a6", fontSize: 11 },
-  grid: { vertLines: { color: "#1b2230" }, horzLines: { color: "#1b2230" } },
-  timeScale: { timeVisible: true, secondsVisible: true, borderColor: "#232b3a" },
-  rightPriceScale: { borderColor: "#232b3a" },
+  layout: { background: { color: "#11151d" }, textColor: "#9aa4b8", fontSize: 11 },
+  grid: { vertLines: { color: "#171c26" }, horzLines: { color: "#171c26" } },
+  timeScale: { timeVisible: true, secondsVisible: true, borderColor: "#222938" },
+  rightPriceScale: { borderColor: "#222938" },
   crosshair: { mode: 0 },
 };
 
@@ -502,14 +588,14 @@ async function loadStats() {
     <div class="stat-tile"><div class="v">${d.totals.completed ?? 0}</div><div class="k">outcomes complete</div></div>
     <div class="stat-tile"><div class="v">${d.haircut_bps}bp</div><div class="k">haircut</div></div>`;
   const cols = [
-    ["n", (r2) => r2.signals],
-    ["alerts", (r2) => r2.alerts ?? 0],
-    ["hit 30s", (r2) => pct(r2.hit_ret_30s)], ["n", (r2) => r2.n_ret_30s ?? 0],
-    ["hit 1m", (r2) => pct(r2.hit_ret_1m)], ["n", (r2) => r2.n_ret_1m ?? 0],
-    ["hit 3m", (r2) => pct(r2.hit_ret_3m)],
-    ["hit 5m", (r2) => pct(r2.hit_ret_5m)],
-    ["avg MFE", (r2) => num(r2.avg_mfe, 4)],
-    ["avg MAE", (r2) => num(r2.avg_mae, 4)],
+    ["n", (x) => x.signals],
+    ["alerts", (x) => x.alerts ?? 0],
+    ["hit 30s", (x) => pct(x.hit_ret_30s)],
+    ["hit 1m", (x) => pct(x.hit_ret_1m)],
+    ["hit 3m", (x) => pct(x.hit_ret_3m)],
+    ["hit 5m", (x) => pct(x.hit_ret_5m)],
+    ["avg MFE", (x) => num(x.avg_mfe, 4)],
+    ["avg MAE", (x) => num(x.avg_mae, 4)],
   ];
   $("stats-rule").innerHTML = tbl(d.by_rule, cols);
   $("stats-symbol").innerHTML = tbl(d.by_symbol, cols);
@@ -552,7 +638,6 @@ function connect() {
     } else if (msg.type === "hello") {
       onHello(msg);
     }
-    // "signal" events feed the DB/stats; the board is the visible surface
   };
   ws.onclose = () => {
     $("disconnect-banner").hidden = false;
@@ -567,8 +652,6 @@ function onHello(msg) {
   state.alertScore = msg.alert_score;
   state.watchScore = msg.watch_score;
   if (msg.symbols.join(",") !== state.symbols.join(",")) {
-    // fresh build OR the server restarted with a different watchlist:
-    // rebuild so removed symbols don't linger as frozen ghost rows
     gridBody.textContent = "";
     state.rows.clear();
     lastOrder = "";

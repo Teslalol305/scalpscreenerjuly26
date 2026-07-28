@@ -16,13 +16,14 @@
   </nav>
   <div id="statusbar">
     <span class="st" id="st-conn"><i class="dot"></i><b>feed</b></span>
-    <span class="st" title="messages per second"><b id="st-rate">0</b> msg/s</span>
-    <span class="st" title="exchange->receive latency incl. clock skew">ingest <b id="st-ingest">–</b></span>
-    <span class="st" title="tick->UI push latency (monotonic clock)">tick→ui <b id="st-pipe">–</b></span>
-    <span class="st" title="dropped/unroutable messages">drops <b id="st-drops">0</b></span>
-    <span class="st" id="st-audit" title="continuous self-verification: data cross-checks + logic invariants">audit <b>–</b></span>
-    <span class="st">up <b id="st-uptime">0s</b></span>
-    <button id="sound-toggle" title="sound on entries; double-beep on ALERT tier">🔇</button>
+    <span class="st"><b id="st-rate">0</b><u>msg/s</u></span>
+    <span class="st" title="exchange → this machine, incl. clock skew"><b id="st-ingest">–</b><u>ingest</u></span>
+    <span class="st" title="trade tick → your screen"><b id="st-pipe">–</b><u>tick→ui</u></span>
+    <span class="st"><b id="st-drops">0</b><u>drops</u></span>
+    <span class="st" id="st-audit" title="continuous self-verification"><b>–</b><u>audit</u></span>
+    <span class="st"><b id="st-uptime">0s</b><u>uptime</u></span>
+    <button id="help-toggle" title="what does everything mean?">?</button>
+    <button id="sound-toggle" title="sound on new signals; double-beep on ALERT tier">🔇</button>
   </div>
 </header>
 
@@ -32,32 +33,42 @@
       <table id="grid">
         <thead>
           <tr>
-            <th>sym</th><th>price</th><th>1m%</th><th>5m%</th><th>15m%</th>
-            <th title="volume z-score vs trailing 30-min">vol z</th>
-            <th title="cumulative volume delta, 5-min window">cvd 5m</th>
-            <th title="top-10 depth imbalance (bid share)">book</th>
-            <th title="spread, basis points">spr</th>
-            <th title="funding rate (hourly); ring = 7d percentile">fund</th>
-            <th title="open-interest change over 5 min">Δoi 5m</th>
-            <th class="score">L</th><th class="score">S</th>
+            <th class="ta-l"><i>market</i></th>
+            <th><i>price</i><u>last trade</u></th>
+            <th><i>1m</i><u>change</u></th>
+            <th><i>5m</i><u>change</u></th>
+            <th><i>15m</i><u>change</u></th>
+            <th title="how unusual current volume is: 0 = normal, +3 = extreme burst"><i>vol z</i><u>vs normal</u></th>
+            <th title="cumulative buy volume minus sell volume, last 5 minutes"><i>flow</i><u>cvd · 5m</u></th>
+            <th title="share of resting orders on the bid side of the book (top 10 levels)"><i>depth</i><u>bid share</u></th>
+            <th title="bid-ask spread in basis points (1bp = 0.01%)"><i>spread</i><u>bp</u></th>
+            <th title="hourly funding rate; bold = at a 7-day extreme"><i>funding</i><u>bp/hr</u></th>
+            <th title="open-interest change over 5 minutes, in contracts/base units"><i>ΔOI</i><u>5 min</u></th>
+            <th title="bullish rule confluence, 0-100"><i>long</i><u>score</u></th>
+            <th title="bearish rule confluence, 0-100"><i>short</i><u>score</u></th>
           </tr>
         </thead>
         <tbody id="grid-body"></tbody>
       </table>
     </div>
-    <div id="learn-strip">
-      <div id="learn-title" title="measured win rate per rule; weight = learned composite multiplier">LEARNING · win rates</div>
+    <footer id="learn-strip">
+      <div id="learn-title">SYSTEM LEARNING<u>measured win rates per strategy</u></div>
       <div id="learn-meters"></div>
-    </div>
+    </footer>
   </section>
 
   <aside id="board-pane">
     <div id="board-head">
-      <h2>ACTIVE SIGNALS</h2>
-      <span id="board-count" class="note"></span>
+      <h2>LIVE TRADE SIGNALS</h2>
+      <span id="board-count"></span>
+      <span id="ticker-tally" title="wins / losses this session"></span>
     </div>
-    <div id="board-cards"><div id="board-empty">no active signals — rules armed</div></div>
-    <div id="ticker-head"><h2>RESOLVED</h2><span id="ticker-tally" class="note"></span></div>
+    <div id="board-cards"><div id="board-empty">
+      <b>no active signals</b>
+      <p>rules are armed — a card appears here the moment a setup fires.<br>
+      bigger &amp; greener card = higher measured win probability.</p>
+    </div></div>
+    <div id="ticker-head"><h2>COMPLETED</h2><span class="hint">newest first</span></div>
     <ol id="ticker"></ol>
   </aside>
 </main>
@@ -78,11 +89,52 @@
       <button class="tf active" data-tf="1s">1s</button>
       <button class="tf" data-tf="1m">1m</button>
     </div>
-    <span id="drawer-vwap" class="note"></span>
     <button id="drawer-close">✕</button>
   </div>
   <div id="chart-price"></div>
   <div id="chart-cvd"></div>
+</div>
+
+<div id="help-overlay" hidden>
+  <div id="help-panel">
+    <div id="help-head"><h2>Reading this dashboard</h2><button id="help-close">✕</button></div>
+    <div class="help-cols">
+      <section>
+        <h3>Signal cards (right panel)</h3>
+        <dl>
+          <dt>Card size &amp; color</dt><dd>Conviction. Bigger, greener cards = higher measured win probability. Gray = below coin-flip odds.</dd>
+          <dt>Win probability ring</dt><dd>Chance this signal ends profitable, learned from every past signal of the same strategy (n = how many). "model" = the machine-learning estimate for these exact market conditions; "history" = the strategy's overall record.</dd>
+          <dt>Entry ladder E1·E2·E3</dt><dd>Scale-in plan: first entry at the signal, two more orders at better prices. A filled dot = that level traded. Your average entry updates as rungs fill.</dd>
+          <dt>Trade gauge</dt><dd>Where price sits right now between the stop (left) and profit territory (right). The dot is live price, in R units (1R = distance from entry to stop).</dd>
+          <dt>BE / TRAIL chips</dt><dd>Automatic management: at +1R a third of the position is banked and the stop moves to break-even (BE). At +1.5R the stop trails 1R behind the best price (TRAIL).</dd>
+          <dt>banked</dt><dd>Profit already secured by the +1R partial, in R.</dd>
+          <dt>live R</dt><dd>Total open result right now, in R units.</dd>
+          <dt>Time bar</dt><dd>How long the trade has been open, out of the 2-hour maximum.</dd>
+        </dl>
+      </section>
+      <section>
+        <h3>Market table (left)</h3>
+        <dl>
+          <dt>vol z</dt><dd>How unusual current trading volume is vs the last 30 minutes. 0 = normal, +2.5 = strong burst, the level rules look for.</dd>
+          <dt>flow (CVD)</dt><dd>Buying minus selling pressure over 5 minutes. Rising line = buyers in control.</dd>
+          <dt>depth</dt><dd>Share of resting orders sitting on the bid. Above 0.65 = heavy buy-side wall.</dd>
+          <dt>spread</dt><dd>Cost to cross the book, in basis points. Tight spread = cheap to trade.</dd>
+          <dt>funding</dt><dd>Hourly rate longs pay shorts (positive) or shorts pay longs (negative). Bold = 7-day extreme, a crowding signal.</dd>
+          <dt>ΔOI</dt><dd>Change in open interest: rising = new positions entering.</dd>
+          <dt>long / short score</dt><dd>How many bullish/bearish rules agree right now, 0–100. 60+ = watch, 80+ = alert.</dd>
+          <dt>warm · stale · qtn</dt><dd>warm: statistics still warming up (~30 min after start, no signals yet). stale: no trades for 30s. qtn: data failed a self-audit check — signals suspended for that market.</dd>
+        </dl>
+        <h3>Completed list</h3>
+        <dl>
+          <dt>WIN / LOSS ± R</dt><dd>Final result in R. Exit reason: TARGET-less system — STOP (initial stop hit), BE (break-even stop after banking), TRAIL (trailing stop, usually a win), TIME (2-hour limit).</dd>
+        </dl>
+        <h3>Bottom strip</h3>
+        <dl>
+          <dt>win rate / avg R / w× / ml</dt><dd>Per strategy: measured win %, average R per signal (expectancy), the learned weight multiplier applied to its score, and how many samples the ML model has trained on.</dd>
+        </dl>
+      </section>
+    </div>
+  </div>
 </div>
 
 <div id="disconnect-banner" hidden>connection to tapescreen lost — retrying…</div>

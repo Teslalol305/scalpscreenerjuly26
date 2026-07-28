@@ -115,6 +115,10 @@ class TradeSignal:
             "status": self.status, "exit_ts": self.exit_ts,
             "exit_price": self.exit_price, "exit_reason": self.exit_reason,
             "r_result": round(self.total_r, 2), "live_r": round(self.live_r(), 2),
+            # R-space positions for the UI trade gauge
+            "leg_r": round(self.leg_r(self.last_price), 2) if self.last_price > 0 else 0.0,
+            "stop_r": round(self.side_sign * (self.stop - self.avg_entry) / self.risk_unit, 2)
+            if self.risk_unit > 0 else -1.0,
         }
 
 
