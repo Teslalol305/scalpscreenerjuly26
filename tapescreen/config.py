@@ -105,6 +105,15 @@ class LearningConfig:
 
 
 @dataclass(slots=True)
+class AuditConfig:
+    selftest_on_boot: bool
+    interval_s: float
+    price_divergence_pct: float
+    mids_fresh_s: float
+    quarantine_clear_checks: int
+
+
+@dataclass(slots=True)
 class Config:
     port: int
     sound_default: bool
@@ -120,6 +129,7 @@ class Config:
     composite: CompositeConfig
     stats: StatsConfig
     learning: LearningConfig
+    audit: AuditConfig
     db_path: str
     log_path: str
     feed_debug: bool
@@ -304,6 +314,13 @@ def load_config(path: str | Path = "config.yaml") -> Config:
             model_l2=_num(doc, "learning.model_l2", 0),
             model_min_n=_int(doc, "learning.model_min_n", 1),
             refit_epochs=_int(doc, "learning.refit_epochs", 0),
+        ),
+        audit=AuditConfig(
+            selftest_on_boot=_bool(doc, "audit.selftest_on_boot"),
+            interval_s=_num(doc, "audit.interval_s", 5),
+            price_divergence_pct=_num(doc, "audit.price_divergence_pct", 0.01),
+            mids_fresh_s=_num(doc, "audit.mids_fresh_s", 1),
+            quarantine_clear_checks=_int(doc, "audit.quarantine_clear_checks", 1),
         ),
         db_path=_str(doc, "db.path"),
         log_path=_str(doc, "logging.path"),

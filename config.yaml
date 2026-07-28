@@ -128,6 +128,14 @@ learning:
                                 #   Beta bucket; above, the model's probability
   refit_epochs: 3               # boot-time refit passes over stored history
 
+# Continuous self-verification: boot logic selftest + runtime data/logic audits.
+audit:
+  selftest_on_boot: true        # re-verify core math vs known constants at startup
+  interval_s: 30                # runtime audit cadence
+  price_divergence_pct: 1.0     # trade price vs venue allMids tolerance
+  mids_fresh_s: 30              # only compare against a mid this recent
+  quarantine_clear_checks: 3    # clean audits required to lift a quarantine
+
 db:
   path: data/tapescreen.db
 

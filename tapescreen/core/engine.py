@@ -11,7 +11,7 @@ from collections import deque
 from typing import Any
 
 from tapescreen.config import Config
-from tapescreen.core.events import Bbo, BookTop, Event, FeedStatus, PerpCtx, Tick
+from tapescreen.core.events import Bbo, BookTop, Event, FeedStatus, Mids, PerpCtx, Tick
 from tapescreen.core.features import FeatureEngine, FeatureSnapshot
 from tapescreen.core.signals.base import SignalEvent
 from tapescreen.core.signals.composite import Composite
@@ -37,6 +37,9 @@ class Engine:
         self.cfg = cfg
         self.db = db
         self.unavailable: set[str] = set()  # symbols absent/delisted on the venue
+        self.quarantined: set[str] = set()  # failing data audits: no new trade signals
+        self.last_mids: dict[str, float] = {}  # venue allMids: independent price reference
+        self.last_mids_ts = 0.0
         self.started_at = time.time()
         self.events_total = 0
         self.ticks_total = 0
@@ -114,11 +117,13 @@ class Engine:
         self.signal_feed.append(row)
         for cb in self._signal_listeners:
             cb(row)
-        # open a tracked trade signal (entry) for directional fires
-        ev.snapshot["_db_id"] = sid
-        trade = self.ledger.on_rule_fire(ev, self.features[ev.symbol].snapshot)
-        if trade is not None:
-            self._emit_trade("entry", trade.to_dict())
+        # open a tracked trade signal (entry) for directional fires - unless the
+        # symbol is quarantined by the auditor (never signal off suspect data)
+        if ev.symbol not in self.quarantined:
+            ev.snapshot["_db_id"] = sid
+            trade = self.ledger.on_rule_fire(ev, self.features[ev.symbol].snapshot)
+            if trade is not None:
+                self._emit_trade("entry", trade.to_dict())
 
     def snapshot(self, symbol: str) -> FeatureSnapshot:
         return self.features[symbol].snapshot
@@ -144,6 +149,9 @@ class Engine:
             if self.db is not None and ev.ts_recv - self._funding_persist_ts[ev.symbol] >= 60.0:
                 self._funding_persist_ts[ev.symbol] = ev.ts_recv
                 self.db.insert_funding(ev.symbol, ev.ts_recv, ev.funding_rate)
+        elif isinstance(ev, Mids):
+            self.last_mids.update(ev.mids)
+            self.last_mids_ts = ev.ts_recv
         elif isinstance(ev, FeedStatus):
             self.feed_status[ev.venue] = ev
 

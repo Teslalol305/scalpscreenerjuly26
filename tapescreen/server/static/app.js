@@ -152,6 +152,7 @@ function updateRow(sym, r, now) {
 
   let badges = "";
   if (r.unavailable) badges += `<span class="badge-stale" title="not tradable on the venue">n/a</span>`;
+  if (r.quarantined) badges += `<span class="badge-qtn" title="failing data audits — signal entries suspended until checks pass">qtn</span>`;
   if (r.warming) badges += `<span class="badge-warm" title="baselines still warming">warm</span>`;
   if (r.stale && !r.unavailable) badges += `<span class="badge-stale">stale</span>`;
   if (r.oi_compression) badges += `<span class="badge-oi" title="OI building while price flat">OI</span>`;
@@ -309,6 +310,20 @@ function updateStatus(st) {
     ? `${st.pipeline_latency_p50_ms}/${st.pipeline_latency_p95_ms}ms` : "–";
   $("st-drops").textContent = (fh.dropped_msgs || 0) + (fh.queue_drops || 0);
   $("st-uptime").textContent = fmtUptime(st.uptime_s || 0);
+
+  const au = $("st-audit"), a = st.audit;
+  const b = au.querySelector("b");
+  if (!a) { b.textContent = "–"; au.title = "self-audit has not run yet"; }
+  else if (a.ok) {
+    b.textContent = "✓";
+    b.style.color = "var(--up)";
+    au.title = `self-audit clean · run #${a.runs} · data cross-checks + logic invariants`;
+  } else {
+    b.textContent = a.failures.length + "!";
+    b.style.color = "var(--dn)";
+    au.title = "SELF-AUDIT ISSUES:\n" + a.failures.join("\n") +
+      (a.quarantined.length ? "\nquarantined: " + a.quarantined.join(", ") : "");
+  }
 }
 
 /* ---------------- alerts & sounds ---------------- */

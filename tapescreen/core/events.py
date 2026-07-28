@@ -73,6 +73,14 @@ class PerpCtx:
 
 
 @dataclass(slots=True)
+class Mids:
+    """Venue-published mid prices (allMids): independent reference for auditing."""
+
+    ts_recv: float
+    mids: dict[str, float]  # ui symbol -> mid
+
+
+@dataclass(slots=True)
 class FeedStatus:
     """Feed lifecycle + health, surfaced in the UI status bar."""
 
@@ -82,4 +90,4 @@ class FeedStatus:
     detail: str
 
 
-Event = Tick | BookTop | Bbo | PerpCtx | FeedStatus
+Event = Tick | BookTop | Bbo | PerpCtx | Mids | FeedStatus

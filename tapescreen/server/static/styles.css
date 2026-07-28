@@ -77,6 +77,7 @@ tr.stale .imb-bar i, tr.stale .scorecell { opacity: .3; }
 .badge-warm { font-size: 10px; color: var(--watch); margin-left: 6px; }
 .badge-stale { font-size: 10px; color: var(--ink-3); margin-left: 6px; }
 .badge-oi { font-size: 10px; color: var(--accent); margin-left: 6px; border: 1px solid var(--accent); border-radius: 4px; padding: 0 3px; }
+.badge-qtn { font-size: 10px; color: var(--dn); margin-left: 6px; border: 1px solid var(--dn); border-radius: 4px; padding: 0 3px; font-weight: 700; }
 
 .num-up { color: var(--up); }
 .num-dn { color: var(--dn); }

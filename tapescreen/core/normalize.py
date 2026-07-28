@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from tapescreen.core.events import BUY, SELL, Bbo, BookTop, Event, PerpCtx, Tick
+from tapescreen.core.events import BUY, SELL, Bbo, BookTop, Event, Mids, PerpCtx, Tick
 
 VENUE = "hyperliquid"
 
@@ -46,7 +46,9 @@ class Normalizer:
             return self._bbo(data, ts_recv, ts_mono)
         if channel == "activeAssetCtx":
             return self._ctx(data, ts_recv, ts_mono)
-        if channel in ("subscriptionResponse", "pong", "allMids", "error"):
+        if channel == "allMids":
+            return self._mids(data, ts_recv)
+        if channel in ("subscriptionResponse", "pong", "error"):
             return []  # handled (or intentionally ignored) upstream in the feed
         self.dropped += 1
         return []
@@ -137,6 +139,18 @@ class Normalizer:
                 ask_sz=_f(ask.get("sz")) if isinstance(ask, dict) else 0.0,
             )
         ]
+
+    def _mids(self, data: Any, ts_recv: float) -> list[Event]:
+        if not isinstance(data, dict):
+            self.dropped += 1
+            return []
+        raw = data.get("mids") or {}
+        mids = {}
+        for coin, sym in self.coin_to_symbol.items():
+            v = _f(raw.get(coin))
+            if v > 0:
+                mids[sym] = v
+        return [Mids(ts_recv=ts_recv, mids=mids)] if mids else []
 
     def _ctx(self, data: Any, ts_recv: float, ts_mono: float) -> list[Event]:
         if not isinstance(data, dict):

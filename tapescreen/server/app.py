@@ -44,11 +44,13 @@ class UiServer:
         engine: Engine,
         feed: HyperliquidFeed | None,
         db: Db | None,
+        auditor: Any = None,
     ) -> None:
         self.cfg = cfg
         self.engine = engine
         self.feed = feed
         self.db = db
+        self.auditor = auditor
         self.clients: set[WebSocket] = set()
         self.pipe_lat: deque[float] = deque(maxlen=2000)  # tick->push, seconds (live only)
         self._last_msgs_total = 0
@@ -79,10 +81,12 @@ class UiServer:
 
         @app.get("/health")
         async def health() -> JSONResponse:
+            report = self.auditor.last_report if self.auditor else None
             return JSONResponse({
                 "ok": True,
                 "engine": self.engine.status(),
                 "feed": self.feed.health() if self.feed else {"venue": "replay"},
+                "audit": report.to_dict() if report else {"ok": None, "detail": "not run yet"},
             })
 
         @app.get("/stats")
@@ -158,6 +162,7 @@ class UiServer:
             "funding_bias": flags.get("funding_bias", ""),
             "warming": s.warming,
             "unavailable": sym in self.engine.unavailable,
+            "quarantined": sym in self.engine.quarantined,
             "stale": bool(last_tick and now - last_tick > self.cfg.symbol_stale_s)
             or last_tick == 0.0,
         }
@@ -179,6 +184,10 @@ class UiServer:
         st["pipeline_latency_p95_ms"] = round(percentile(lat, 95) * 1000, 1)
         st["msg_rate"] = round(self.msg_rate, 1)
         st["feed_health"] = feed_health
+        rep = self.auditor.last_report if self.auditor else None
+        st["audit"] = ({"ok": rep.ok, "failures": rep.failures[:8],
+                        "quarantined": rep.quarantined, "runs": rep.runs_total}
+                       if rep else None)
         led = self.engine.ledger
         board = {
             "active": led.active(),

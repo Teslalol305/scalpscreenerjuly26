@@ -16,12 +16,14 @@ import time
 from pathlib import Path
 
 from tapescreen.config import Config, load_config
+from tapescreen.core.audit import Auditor
 from tapescreen.core.engine import Engine
 from tapescreen.feeds.hyperliquid import HyperliquidFeed
 from tapescreen.feeds.recorder import Recorder
 from tapescreen.feeds.replayer import Replayer
 from tapescreen.feeds.warmup import run_warmup
 from tapescreen.logs import setup_logging
+from tapescreen.selftest import run_selftest
 from tapescreen.server.app import UiServer
 from tapescreen.store.db import Db
 
@@ -116,9 +118,18 @@ async def run(cfg: Config, args: argparse.Namespace) -> int:
 
         tasks.append(supervise(asyncio.create_task(_timer(), name="record-timer")))
 
+    auditor = Auditor(cfg, engine, feed, db)
+
+    async def _audit_loop() -> None:
+        while True:
+            await asyncio.sleep(cfg.audit.interval_s)
+            auditor.run()
+
+    tasks.append(supervise(asyncio.create_task(_audit_loop(), name="auditor")))
+
     ui: UiServer | None = None
     if not args.no_ui:
-        ui = UiServer(cfg, engine, feed, db)
+        ui = UiServer(cfg, engine, feed, db, auditor=auditor)
         tasks += [supervise(t) for t in await ui.start()]
 
     status_task = supervise(asyncio.create_task(_status_loop(engine, feed), name="status"))
@@ -169,13 +180,27 @@ def cli(argv: list[str] | None = None) -> int:
     parser.add_argument("--speed", type=float, default=1.0,
                         help="replay speed multiplier (0 = as fast as possible)")
     parser.add_argument("--no-ui", action="store_true", help="run headless (no dashboard)")
+    parser.add_argument("--selftest", action="store_true",
+                        help="run the logic self-test and exit")
     args = parser.parse_args(argv)
+
+    if args.selftest:
+        errs = run_selftest()
+        print("selftest:", "OK - all checks passed" if not errs else f"FAILED: {errs}")
+        return 0 if not errs else 1
 
     if args.replay and not Path(args.replay).exists():
         parser.error(f"recording not found: {args.replay}")
 
     cfg = load_config(args.config)
     log_file = setup_logging(cfg.log_path, cfg.feed_debug)
+
+    if cfg.audit.selftest_on_boot:
+        errs = run_selftest()
+        if errs:
+            log.error("boot self-test FAILED - refusing to run on broken logic: %s", errs)
+            return 1
+        log.info("boot self-test passed (%s)", "core math verified")
     log.info("tapescreen starting", extra={"log_file": str(log_file), "symbols": len(cfg.symbols)})
     t0 = time.time()
     try:
