@@ -531,6 +531,7 @@ function connect() {
 }
 
 function onHello(msg) {
+  $("ver").textContent = msg.version ? "v" + msg.version : "";
   state.alertScore = msg.alert_score;
   state.watchScore = msg.watch_score;
   if (msg.symbols.join(",") !== state.symbols.join(",")) {

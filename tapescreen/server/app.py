@@ -65,6 +65,14 @@ class UiServer:
     def _build_app(self) -> FastAPI:
         app = FastAPI(title="TapeScreen", docs_url=None, redoc_url=None)
 
+        @app.middleware("http")
+        async def no_stale_ui(request, call_next):
+            # revalidate every UI asset on each load (304 when unchanged) so a
+            # stale browser cache can never show an old dashboard after upgrades
+            resp = await call_next(request)
+            resp.headers["Cache-Control"] = "no-cache"
+            return resp
+
         @app.get("/")
         async def index() -> FileResponse:
             return FileResponse(STATIC_DIR / "index.html")
@@ -109,8 +117,11 @@ class UiServer:
     # ------------------------------------------------------------------ payloads
 
     def _hello(self) -> dict[str, Any]:
+        from tapescreen import __version__
+
         return {
             "type": "hello",
+            "version": __version__,
             "symbols": list(self.cfg.symbols),
             "sound_default": self.cfg.sound_default,
             "watch_score": self.cfg.composite.watch_score,
