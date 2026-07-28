@@ -95,6 +95,8 @@ stats:
   mfe_mae_window_s: 300
 
 # Trade-signal ledger + self-learning confidence (screener only - no orders).
+# Trade plans mirror a scale-in / manage-the-winner style: laddered entries,
+# scale-out at +1R with stop to break-even, trailing stop, multi-hour holds.
 learning:
   enabled: true
   prior_wins: 3.0               # Beta prior: confidence starts at 50% and
@@ -105,11 +107,26 @@ learning:
   weight_mult_max: 1.4
   weight_min_n: 10              # rule needs this many resolutions before its
                                 #   composite weight is adjusted at all
-  stop_atr_min: 0.35            # stop distance clamp, in ATR(1m) multiples
-  stop_atr_max: 1.5
-  target_r: 1.0                 # symmetric 1R target: win-rate maps to edge
-  max_hold_s: 300               # TIME exit at the outcome horizon
+  stop_atr_min: 1.0             # stop distance clamp, in ATR(1m) multiples
+  stop_atr_max: 4.0             #   (wider: holds run minutes-to-hours)
   one_per_side: true            # one active signal per (symbol, side)
+  # --- entry ladder (scale-in) ---
+  entry_levels: 3               # tranches: signal price + adds at better prices
+  entry_step_r: 0.5             # each add sits 0.5R below (long) the previous
+  entry_window_s: 900           # adds may fill for 15 min, then ladder freezes
+  # --- trade management ---
+  tp1_r: 1.0                    # at +1R: scale out 1/3 and move stop to break-even
+  tp1_fraction: 0.333
+  trail_start_r: 1.5            # at +1.5R a trailing stop activates ...
+  trail_dist_r: 1.0             # ... trailing 1R behind the best price
+  max_hold_s: 7200              # TIME exit at 2 hours
+  # --- online model (per-rule logistic regression on entry context) ---
+  model_enabled: true
+  model_lr: 0.05                # SGD learning rate
+  model_l2: 0.001               # L2 regularization
+  model_min_n: 30               # below this many updates, confidence uses the
+                                #   Beta bucket; above, the model's probability
+  refit_epochs: 3               # boot-time refit passes over stored history
 
 db:
   path: data/tapescreen.db

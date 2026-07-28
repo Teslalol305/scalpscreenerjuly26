@@ -88,9 +88,20 @@ class LearningConfig:
     weight_min_n: int
     stop_atr_min: float
     stop_atr_max: float
-    target_r: float
-    max_hold_s: float
     one_per_side: bool
+    entry_levels: int
+    entry_step_r: float
+    entry_window_s: float
+    tp1_r: float
+    tp1_fraction: float
+    trail_start_r: float
+    trail_dist_r: float
+    max_hold_s: float
+    model_enabled: bool
+    model_lr: float
+    model_l2: float
+    model_min_n: int
+    refit_epochs: int
 
 
 @dataclass(slots=True)
@@ -279,9 +290,20 @@ def load_config(path: str | Path = "config.yaml") -> Config:
             weight_min_n=_int(doc, "learning.weight_min_n", 1),
             stop_atr_min=_num(doc, "learning.stop_atr_min", 0.05),
             stop_atr_max=_num(doc, "learning.stop_atr_max", 0.05),
-            target_r=_num(doc, "learning.target_r", 0.1),
-            max_hold_s=_num(doc, "learning.max_hold_s", 30),
             one_per_side=_bool(doc, "learning.one_per_side"),
+            entry_levels=_int(doc, "learning.entry_levels", 1),
+            entry_step_r=_num(doc, "learning.entry_step_r", 0.05),
+            entry_window_s=_num(doc, "learning.entry_window_s", 10),
+            tp1_r=_num(doc, "learning.tp1_r", 0.1),
+            tp1_fraction=_num(doc, "learning.tp1_fraction", 0),
+            trail_start_r=_num(doc, "learning.trail_start_r", 0.1),
+            trail_dist_r=_num(doc, "learning.trail_dist_r", 0.05),
+            max_hold_s=_num(doc, "learning.max_hold_s", 60),
+            model_enabled=_bool(doc, "learning.model_enabled"),
+            model_lr=_num(doc, "learning.model_lr", 0.0001),
+            model_l2=_num(doc, "learning.model_l2", 0),
+            model_min_n=_int(doc, "learning.model_min_n", 1),
+            refit_epochs=_int(doc, "learning.refit_epochs", 0),
         ),
         db_path=_str(doc, "db.path"),
         log_path=_str(doc, "logging.path"),

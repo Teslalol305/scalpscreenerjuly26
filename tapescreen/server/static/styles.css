@@ -149,6 +149,17 @@ td.flash-dn { animation: fdn .45s; }
 .conf-hi .pct { color: var(--up); }
 .conf-lo .pct { color: var(--ink-2); }
 
+.card .ladder { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+.lvl {
+  font-size: 11px; color: var(--ink-3); border: 1px dashed var(--line);
+  border-radius: 4px; padding: 1px 6px;
+}
+.lvl.filled { color: var(--ink); border-style: solid; border-color: var(--accent); }
+.lvl.filled::before { content: "● "; color: var(--accent); font-size: 8px; vertical-align: 1px; }
+.statechip { font-style: normal; font-size: 9px; font-weight: 800; border-radius: 3px; padding: 0 4px; margin-left: 3px; }
+.statechip.st-BE { background: var(--watch); color: #201704; }
+.statechip.st-TRAIL { background: var(--up); color: #06211e; }
+
 .card .r2 { display: flex; gap: 14px; margin-top: 8px; font-size: 13px; }
 .card .kv b { font-size: 15px; }
 .card .kv span { color: var(--ink-3); font-size: 10px; text-transform: uppercase; display: block; }

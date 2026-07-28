@@ -1,7 +1,8 @@
-"""SignalLedger tests: entry/stop/target math, exits, learning posteriors, DB."""
+"""SignalLedger v3 tests: ladder entries, BE/trail management, learning, DB."""
 
 from __future__ import annotations
 
+import sqlite3
 import time
 
 import pytest
@@ -28,9 +29,9 @@ def snap(atr: float = 1.0, price: float = 100.0) -> FeatureSnapshot:
     return s
 
 
-def fire(side: str = "long", price: float = 100.0, inv: float = 99.5,
+def fire(side: str = "long", price: float = 100.0, inv: float = 98.0,
          rule: str = "momentum_ignition", ts: float = T0) -> SignalEvent:
-    return SignalEvent(ts, "BTC", side, rule, 0.8, tier="INFO",
+    return SignalEvent(ts, "BTC", side, rule, 0.8, tier="INFO", score=30.0,
                        snapshot={"price": price, "invalidation": inv})
 
 
@@ -38,150 +39,183 @@ def tick(ts: float, px: float) -> Tick:
     return Tick(ts, ts, ts, "BTC", px, 1.0, "buy", int(ts * 10) % 10**9, "hyperliquid")
 
 
-def test_entry_levels_from_invalidation_clamped_by_atr() -> None:
+# --------------------------------------------------------------- entry ladder
+
+def test_ladder_construction_long() -> None:
     led = SignalLedger(fresh_cfg(), None)
-    # invalidation 99.5 -> dist 0.5, within [0.35, 1.5] x ATR(1.0) -> stop 99.5, target 100.5
+    # inv 98 -> risk 2.0, inside [1.0, 4.0] x ATR(1.0)? clamp: min(4*1, max(1*1, 2)) = 1.0? no:
+    # stop_atr_min/max are in ATR multiples: min(4.0, max(1.0, 2.0)) = 2.0 -> stop 98
     t = led.on_rule_fire(fire(), snap(atr=1.0))
-    assert t is not None
-    assert t.entry == 100.0 and t.stop == pytest.approx(99.5) and t.target == pytest.approx(100.5)
-    # confidence at prior with no history: (0+3)/(0+6) = 50%
-    assert t.confidence == pytest.approx(0.5)
-    assert t.conf_n == 0
+    assert t.risk_unit == pytest.approx(2.0)
+    assert t.stop == pytest.approx(98.0)
+    # ladder: E1 at signal, adds each 0.5R = 1.0 lower
+    assert [lv["px"] for lv in t.levels] == pytest.approx([100.0, 99.0, 98.0])
+    assert t.filled == 1 and t.avg_entry == pytest.approx(100.0)
+    assert t.confidence == pytest.approx(0.5) and t.conf_src == "bucket"
 
 
-def test_stop_distance_clamps_and_wrong_side_fallback() -> None:
+def test_ladder_fills_improve_average_entry() -> None:
+    led = SignalLedger(fresh_cfg(), None)
+    led.on_rule_fire(fire(), snap())
+    assert led.on_tick(tick(T0 + 30, 99.0)) == []  # E2 fills, still open
+    t = led.open["BTC"][0]
+    assert t.filled == 2 and t.avg_entry == pytest.approx(99.5)
+
+
+def test_ladder_freezes_after_entry_window() -> None:
+    cfg = fresh_cfg()  # entry_window_s 900
+    led = SignalLedger(cfg, None)
+    led.on_rule_fire(fire(), snap())
+    led.on_tick(tick(T0 + 901, 99.0))  # past the window: no fill
+    t = led.open["BTC"][0]
+    assert t.filled == 1 and t.avg_entry == pytest.approx(100.0)
+
+
+def test_stop_out_with_partial_ladder_costs_half_r() -> None:
+    led = SignalLedger(fresh_cfg(), None)
+    led.on_rule_fire(fire(), snap())
+    # one print sweeps through E2, E3 and the stop: fills average to 99, exit at 98
+    (t,) = led.on_tick(tick(T0 + 10, 97.9))
+    assert t.filled == 3 and t.avg_entry == pytest.approx(99.0)
+    assert t.exit_reason == "STOP" and t.status == "loss"
+    # scaling thesis in one number: full stop-out loses (98-99)/2 = -0.5R, not -1R
+    assert t.total_r == pytest.approx(-0.5)
+
+
+# ------------------------------------------------------------ trade management
+
+def test_tp1_banks_partial_and_moves_stop_to_break_even() -> None:
     cfg = fresh_cfg()
     led = SignalLedger(cfg, None)
-    # invalidation too far (dist 5 > 1.5 x ATR 1.0) -> clamp to 1.5
-    t = led.on_rule_fire(fire(price=100.0, inv=95.0), snap(atr=1.0))
-    assert t.stop == pytest.approx(98.5)
-    led2 = SignalLedger(cfg, None)
-    # invalidation on the wrong side of a long -> fallback to 1 x ATR
-    t2 = led2.on_rule_fire(fire(price=100.0, inv=101.0), snap(atr=0.8))
-    assert t2.stop == pytest.approx(99.2)
-    led3 = SignalLedger(cfg, None)
-    # too-tight invalidation (0.1 < 0.35 x ATR 1.0) -> clamp up to 0.35
-    t3 = led3.on_rule_fire(fire(price=100.0, inv=99.9), snap(atr=1.0))
-    assert t3.stop == pytest.approx(99.65)
+    led.on_rule_fire(fire(), snap())  # long 100, risk 2
+    assert led.on_tick(tick(T0 + 60, 102.0)) == []  # +1R: TP1 + BE, stays open
+    t = led.open["BTC"][0]
+    assert t.tp1_done and t.state == "BE"
+    assert t.stop == pytest.approx(100.0)
+    assert t.realized == pytest.approx(cfg.learning.tp1_fraction * cfg.learning.tp1_r)
+    (done,) = led.on_tick(tick(T0 + 120, 99.9))  # BE stop tags out the runner
+    assert done.exit_reason == "BE" and done.status == "win"
+    assert done.total_r == pytest.approx(t.realized)  # runner leg exits flat
+
+
+def test_trailing_stop_ratchets_and_exits() -> None:
+    cfg = fresh_cfg()
+    f = cfg.learning.tp1_fraction
+    led = SignalLedger(cfg, None)
+    led.on_rule_fire(fire(), snap())  # long 100, risk 2
+    led.on_tick(tick(T0 + 60, 103.0))  # +1.5R: TP1 done AND trail armed
+    t = led.open["BTC"][0]
+    assert t.state == "TRAIL"
+    assert t.stop == pytest.approx(101.0)  # 103 - 1R(=2.0)
+    led.on_tick(tick(T0 + 120, 105.0))  # ratchet: stop -> 103
+    assert t.stop == pytest.approx(103.0)
+    led.on_tick(tick(T0 + 130, 104.0))  # pullback above stop: no change
+    assert t.stop == pytest.approx(103.0)
+    (done,) = led.on_tick(tick(T0 + 180, 102.9))
+    assert done.exit_reason == "TRAIL" and done.status == "win"
+    # banked f*1R + runner (1-f) * (103-100)/2
+    assert done.total_r == pytest.approx(f * 1.0 + (1 - f) * 1.5)
+
+
+def test_time_exit_at_max_hold() -> None:
+    cfg = fresh_cfg()  # max_hold_s 7200 (2h)
+    led = SignalLedger(cfg, None)
+    led.on_rule_fire(fire(), snap())
+    led.on_tick(tick(T0 + 7100, 100.5))  # still inside the hold window
+    assert led.open["BTC"]
+    (t,) = led.on_tick(tick(T0 + 7200, 100.5))
+    assert t.exit_reason == "TIME" and t.status == "win"  # +0.25R > haircut
+    assert t.total_r == pytest.approx(0.25)
+
+
+def test_short_side_trail_mirror() -> None:
+    cfg = fresh_cfg()
+    f = cfg.learning.tp1_fraction
+    led = SignalLedger(cfg, None)
+    led.on_rule_fire(fire(side="short", price=100.0, inv=102.0), snap())
+    led.on_tick(tick(T0 + 60, 97.0))  # -1.5R move: TP1 + TRAIL, stop 97+2=99
+    t = led.open["BTC"][0]
+    assert t.state == "TRAIL" and t.stop == pytest.approx(99.0)
+    (done,) = led.on_tick(tick(T0 + 120, 99.1))
+    assert done.exit_reason == "TRAIL" and done.status == "win"
+    # banked f*1R + runner exits at the 99 trail: (100-99)/2 = 0.5R
+    assert done.total_r == pytest.approx(f * 1.0 + (1 - f) * 0.5)
 
 
 def test_one_per_side_dedup() -> None:
     led = SignalLedger(fresh_cfg(), None)
     assert led.on_rule_fire(fire(), snap()) is not None
-    assert led.on_rule_fire(fire(rule="vwap_fade"), snap()) is None  # same side open
-    assert led.on_rule_fire(fire(side="short", inv=100.5), snap()) is not None
+    assert led.on_rule_fire(fire(rule="vwap_fade"), snap()) is None
+    assert led.on_rule_fire(fire(side="short", inv=102.0), snap()) is not None
 
 
-def test_stop_hit_resolves_loss_minus_one_r() -> None:
-    led = SignalLedger(fresh_cfg(), None)
-    led.on_rule_fire(fire(), snap())  # long 100, stop 99.5
-    out = led.on_tick(tick(T0 + 10, 99.4))
-    assert len(out) == 1
-    t = out[0]
-    assert t.status == "loss" and t.exit_reason == "STOP"
-    assert t.exit_price == pytest.approx(99.5)  # resolved at the stop level
-    assert t.r_result == pytest.approx(-1.0)
-    assert led.active() == []
+# ------------------------------------------------------------------- learning
 
-
-def test_target_hit_resolves_win_plus_one_r() -> None:
-    led = SignalLedger(fresh_cfg(), None)
-    led.on_rule_fire(fire(), snap())  # long 100, target 100.5 -> +0.5% >> 2bp haircut
-    (t,) = led.on_tick(tick(T0 + 10, 100.6))
-    assert t.status == "win" and t.exit_reason == "TARGET"
-    assert t.r_result == pytest.approx(1.0)
-
-
-def test_time_exit_win_only_if_beats_haircut() -> None:
-    cfg = fresh_cfg()  # haircut 2bp
+def test_confidence_backoff_and_model_gate() -> None:
+    cfg = fresh_cfg()  # min_bucket_n 20, model_min_n 30, priors 3/3
     led = SignalLedger(cfg, None)
-    led.on_rule_fire(fire(), snap())  # long 100, risk 0.5
-    led.on_tick(tick(T0 + 100, 100.05))  # +5bp, inside stop/target -> stays open
-    assert led.active()[0]["status"] == "open"
-    (t,) = led.on_tick(tick(T0 + 300, 100.05))
-    assert t.exit_reason == "TIME"
-    assert t.status == "win"  # +5bp > 2bp haircut
-    assert t.r_result == pytest.approx(0.05 / 0.5)
-
-    led2 = SignalLedger(cfg, None)
-    led2.on_rule_fire(fire(), snap())
-    (t2,) = led2.on_tick(tick(T0 + 300, 100.01))  # +1bp <= 2bp haircut -> loss
-    assert t2.status == "loss" and t2.exit_reason == "TIME"
-
-
-def test_short_side_signs() -> None:
-    led = SignalLedger(fresh_cfg(), None)
-    led.on_rule_fire(fire(side="short", price=100.0, inv=100.5), snap())
-    # short: stop 100.5 above, target 99.5 below
-    (t,) = led.on_tick(tick(T0 + 5, 99.4))
-    assert t.status == "win" and t.exit_reason == "TARGET" and t.r_result == pytest.approx(1.0)
+    led.rule_buckets["r"] = Bucket(wins=7, n=10)
+    p, n, src = led.confidence("r", "BTC", None)
+    assert (p, n, src) == (pytest.approx(0.625), 10, "bucket")
+    # an under-trained model must NOT take over
+    m = led._model("r")
+    for _ in range(10):
+        m.update([1.0] * 12, True)
+    _, _, src2 = led.confidence("r", "BTC", [1.0] * 12)
+    assert src2 == "bucket"
+    for _ in range(25):
+        m.update([1.0] * 12, True)
+    p3, n3, src3 = led.confidence("r", "BTC", [1.0] * 12)
+    assert src3 == "model" and n3 == m.n and 0.0 < p3 < 1.0
 
 
-def test_confidence_posterior_and_bucket_backoff() -> None:
-    cfg = fresh_cfg()  # priors 3/3, min_bucket_n 20
-    led = SignalLedger(cfg, None)
-    led.rule_buckets["momentum_ignition"] = Bucket(wins=7, n=10)
-    # pair bucket below min_bucket_n -> rule bucket: (7+3)/(10+6) = 0.625
-    led.pair_buckets[("momentum_ignition", "BTC")] = Bucket(wins=0, n=5)
-    p, n = led.confidence("momentum_ignition", "BTC")
-    assert p == pytest.approx(0.625) and n == 10
-    # pair bucket at min_bucket_n takes precedence: (10+3)/(20+6) = 0.5
-    led.pair_buckets[("momentum_ignition", "BTC")] = Bucket(wins=10, n=20)
-    p2, n2 = led.confidence("momentum_ignition", "BTC")
-    assert p2 == pytest.approx(0.5) and n2 == 20
-
-
-def test_weight_multiplier_gate_and_clamps() -> None:
-    led = SignalLedger(fresh_cfg(), None)  # weight_min_n 10, clamp [0.6, 1.4]
-    assert led.rule_multiplier("momentum_ignition") == 1.0  # no history
-    led.rule_buckets["a"] = Bucket(wins=9, n=9)
-    assert led.rule_multiplier("a") == 1.0  # below weight_min_n
-    led.rule_buckets["b"] = Bucket(wins=9, n=10)  # P=(9+3)/16=0.75 -> 1.5 -> clamp 1.4
-    assert led.rule_multiplier("b") == pytest.approx(1.4)
-    led.rule_buckets["c"] = Bucket(wins=1, n=10)  # P=(1+3)/16=0.25 -> 0.5 -> clamp 0.6
-    assert led.rule_multiplier("c") == pytest.approx(0.6)
-    led.rule_buckets["d"] = Bucket(wins=5, n=10)  # P=0.5 -> exactly 1.0
-    assert led.rule_multiplier("d") == pytest.approx(1.0)
-
-
-def test_resolution_updates_buckets_and_learning_snapshot() -> None:
+def test_resolution_trains_model_and_updates_buckets() -> None:
     led = SignalLedger(fresh_cfg(), None)
     led.on_rule_fire(fire(), snap())
-    led.on_tick(tick(T0 + 10, 100.6))  # win
+    led.on_tick(tick(T0 + 60, 105.0))
+    led.on_tick(tick(T0 + 120, 102.9))  # trail exit -> win
     b = led.rule_buckets["momentum_ignition"]
-    assert (b.wins, b.n) == (1.0, 1.0)
-    ls = led.learning_snapshot()
-    assert ls[0]["rule"] == "momentum_ignition" and ls[0]["n"] == 1
-    assert ls[0]["win_rate"] == 100.0
-    assert ls[0]["confidence"] == pytest.approx(57.1, abs=0.1)  # (1+3)/(1+6)
+    assert b.n == 1.0 and b.wins == 1.0 and b.r_n == 1.0 and b.r_sum > 0
+    assert led._model("momentum_ignition").n == 1
+    snap_l = led.learning_snapshot()[0]
+    assert snap_l["model_n"] == 1 and snap_l["avg_r"] > 0
 
 
-def test_db_persistence_and_legacy_bootstrap(tmp_path) -> None:
+def test_db_roundtrip_refit_and_v2_schema_migration(tmp_path) -> None:
     cfg = fresh_cfg()
-    db = Db(tmp_path / "l.db")
-    # legacy history: two resolved outcomes (one win vs 2bp haircut, one loss)
-    sid1 = db.insert_signal(SignalEvent(T0, "BTC", "long", "vwap_fade", 0.5, tier="INFO",
-                                        snapshot={"price": 100.0}))
-    sid2 = db.insert_signal(SignalEvent(T0 + 1, "BTC", "short", "vwap_fade", 0.5, tier="INFO",
-                                        snapshot={"price": 100.0}))
-    db.upsert_outcome(sid1, {"ret_5m": 0.01, "completed_at": T0 + 300})
-    db.upsert_outcome(sid2, {"ret_5m": -0.01, "completed_at": T0 + 301})
+    # simulate a pre-v3 database: v0.2 trade_signals without the new columns
+    old = tmp_path / "old.db"
+    conn = sqlite3.connect(old)
+    conn.execute("""CREATE TABLE trade_signals (
+        id INTEGER PRIMARY KEY, signal_id INTEGER, ts REAL NOT NULL,
+        symbol TEXT NOT NULL, side TEXT NOT NULL, rule TEXT NOT NULL,
+        tier TEXT NOT NULL, confidence REAL NOT NULL, entry REAL NOT NULL,
+        stop REAL NOT NULL, target REAL NOT NULL,
+        status TEXT NOT NULL DEFAULT 'open', exit_ts REAL, exit_price REAL,
+        exit_reason TEXT, r_result REAL)""")
+    conn.commit()
+    conn.close()
+    db = Db(old)  # must upgrade in place
+    cols = {r[1] for r in db.read_conn().execute("PRAGMA table_info(trade_signals)")}
+    assert {"avg_entry", "entries", "state", "features", "realized_r"} <= cols
 
     led = SignalLedger(cfg, db)
     led.on_rule_fire(fire(rule="vwap_fade"), snap())
-    led.on_tick(tick(T0 + 10, 100.6))  # win -> persisted
+    led.on_tick(tick(T0 + 60, 103.0))
+    led.on_tick(tick(T0 + 120, 100.0))  # trail stop hit -> resolved
     deadline = time.time() + 5
     rows = []
     while time.time() < deadline:  # async writer thread
         rows = db.recent_trade_signals()
-        if rows and rows[0]["status"] == "win":
+        if rows and rows[0]["status"] != "open":
             break
         time.sleep(0.05)
-    assert rows[0]["status"] == "win" and rows[0]["exit_reason"] == "TARGET"
-    assert rows[0]["confidence"] == pytest.approx(0.5)  # legacy 1W/1L at entry time
+    assert rows[0]["status"] == "win"
+    assert rows[0]["state"] == "TRAIL" and rows[0]["features"]
 
-    # a NEW ledger bootstraps: legacy (1 win, 1 loss) + the resolved trade (1 win)
+    # a fresh ledger refits its model from the stored history
     led2 = SignalLedger(cfg, db)
-    b = led2.rule_buckets["vwap_fade"]
-    assert (b.wins, b.n) == (2.0, 3.0)
+    assert led2._model("vwap_fade").n == 1
+    assert led2.rule_buckets["vwap_fade"].n == 1.0
+    assert db.load_models().get("vwap_fade")  # persisted for inspection
     db.close()

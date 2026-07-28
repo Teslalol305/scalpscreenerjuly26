@@ -174,6 +174,7 @@ function confClass(pct) { return pct >= 58 ? "conf-hi" : pct <= 45 ? "conf-lo" :
 
 function cardHtml(t) {
   const conf = t.confidence;
+  const src = t.conf_src === "model" ? "model" : "history";
   return `
     <div class="r1">
       <span class="side-pill ${t.side}">${t.side.toUpperCase()}</span>
@@ -181,12 +182,13 @@ function cardHtml(t) {
       <span class="tierchip ${t.tier}">${t.tier}</span>
       <span class="rule">${shortRule(t.rule)}</span>
       <span class="conf ${confClass(conf)}"><div class="pct">${Math.round(conf)}%</div>
-        <div class="n">win prob · n=${t.conf_n}</div></span>
+        <div class="n">${src} · n=${t.conf_n}</div></span>
     </div>
+    <div class="ladder"></div>
     <div class="r2">
-      <span class="kv"><span>entry</span><b>${fmtPrice(t.entry)}</b></span>
-      <span class="kv"><span>stop</span><b>${fmtPrice(t.stop)}</b></span>
-      <span class="kv"><span>target</span><b>${fmtPrice(t.target)}</b></span>
+      <span class="kv"><span>avg entry</span><b class="v-avg"></b></span>
+      <span class="kv"><span>stop <i class="statechip"></i></span><b class="v-stop"></b></span>
+      <span class="kv"><span>banked</span><b class="v-banked"></b></span>
       <span class="liveR"></span>
     </div>
     <div class="age-bar"><i></i></div>`;
@@ -203,10 +205,24 @@ function makeCard(t, fresh) {
 }
 
 function updateCardLive(el, t) {
+  // ladder: one chip per tranche, filled dots as adds trigger
+  const ladder = el.querySelector(".ladder");
+  const ladderHtml = (t.levels || []).map((lv, i) =>
+    `<span class="lvl ${lv.filled ? "filled" : ""}">E${i + 1} ${fmtPrice(lv.px)}</span>`
+  ).join("");
+  if (ladder.innerHTML !== ladderHtml) ladder.innerHTML = ladderHtml;
+
+  el.querySelector(".v-avg").textContent = fmtPrice(t.avg_entry);
+  el.querySelector(".v-stop").textContent = fmtPrice(t.stop);
+  const chip = el.querySelector(".statechip");
+  chip.textContent = t.state === "INIT" ? "" : t.state;
+  chip.className = "statechip st-" + t.state;
+  el.querySelector(".v-banked").textContent = t.tp1_done ? `+${t.realized}R` : "–";
+
   const lr = el.querySelector(".liveR");
   lr.textContent = fmtSigned(t.live_r, 2) + "R";
   lr.className = "liveR " + (t.live_r > 0.05 ? "num-up" : t.live_r < -0.05 ? "num-dn" : "");
-  const age = Math.min(1, (Date.now() / 1000 - t.ts) / 300);
+  const age = Math.min(1, (Date.now() / 1000 - t.ts) / (state.maxHold || 7200));
   el.querySelector(".age-bar i").style.width = (age * 100).toFixed(0) + "%";
 }
 
@@ -272,11 +288,11 @@ function renderLearning(learning) {
   const box = $("learn-meters");
   if (!learning?.length) { box.innerHTML = "<span class='note'>no resolved signals yet — confidence at prior</span>"; return; }
   box.innerHTML = learning.map((l) => `
-    <div class="meter" title="measured win rate over ${l.n} resolved signals; composite weight x${l.weight_mult}">
+    <div class="meter" title="win rate over ${l.n} resolved signals · avg R = expectancy per trade · model trained on ${l.model_n}">
       <div class="m-top"><span class="m-name">${shortRule(l.rule)}</span>
         <span class="m-val">${l.win_rate == null ? "–" : l.win_rate + "%"}</span></div>
       <div class="m-bar"><i style="width:${l.win_rate || 0}%"></i></div>
-      <div class="m-sub">n=${l.n} · conf ${l.confidence}% · w×${l.weight_mult}</div>
+      <div class="m-sub">n=${l.n} · ${l.avg_r == null ? "" : "avgR " + (l.avg_r > 0 ? "+" : "") + l.avg_r + " · "}w×${l.weight_mult} · ml:${l.model_n}</div>
     </div>`).join("");
 }
 
@@ -532,6 +548,7 @@ function connect() {
 
 function onHello(msg) {
   $("ver").textContent = msg.version ? "v" + msg.version : "";
+  state.maxHold = msg.max_hold_s || 7200;
   state.alertScore = msg.alert_score;
   state.watchScore = msg.watch_score;
   if (msg.symbols.join(",") !== state.symbols.join(",")) {

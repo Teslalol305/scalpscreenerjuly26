@@ -122,6 +122,7 @@ class UiServer:
         return {
             "type": "hello",
             "version": __version__,
+            "max_hold_s": self.cfg.learning.max_hold_s,
             "symbols": list(self.cfg.symbols),
             "sound_default": self.cfg.sound_default,
             "watch_score": self.cfg.composite.watch_score,

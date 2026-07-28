@@ -65,11 +65,28 @@ CREATE TABLE IF NOT EXISTS trade_signals (
     status      TEXT NOT NULL DEFAULT 'open',  -- open | win | loss
     exit_ts     REAL,
     exit_price  REAL,
-    exit_reason TEXT,                          -- TARGET | STOP | TIME
+    exit_reason TEXT,                          -- STOP | BE | TRAIL | TIME
     r_result    REAL
 );
 CREATE INDEX IF NOT EXISTS idx_trade_signals_ts ON trade_signals(ts);
+CREATE TABLE IF NOT EXISTS model_state (
+    rule    TEXT PRIMARY KEY,
+    state   TEXT NOT NULL,
+    n       INTEGER NOT NULL,
+    updated REAL NOT NULL
+);
 """
+
+# columns added after the v0.2 schema; applied idempotently at open (SQLite
+# ALTER TABLE ADD COLUMN), so an existing user DB upgrades in place
+_TRADE_SIGNAL_UPGRADES = {
+    "avg_entry": "REAL",
+    "entries": "TEXT",    # JSON ladder: [{px, filled_ts|null}, ...]
+    "filled": "INTEGER",  # tranches filled
+    "state": "TEXT",      # INIT | BE | TRAIL
+    "realized_r": "REAL",
+    "features": "TEXT",   # JSON entry-context vector for the online model
+}
 
 _SENTINEL: Any = object()
 
@@ -82,6 +99,10 @@ class Db:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.executescript(_SCHEMA)
+            have = {r[1] for r in conn.execute("PRAGMA table_info(trade_signals)")}
+            for col, typ in _TRADE_SIGNAL_UPGRADES.items():
+                if col not in have:
+                    conn.execute(f"ALTER TABLE trade_signals ADD COLUMN {col} {typ}")
             row = conn.execute("SELECT COALESCE(MAX(id), 0) FROM signals").fetchone()
         self._next_id = int(row[0]) + 1
         self._id_lock = threading.Lock()
@@ -129,20 +150,55 @@ class Db:
 
     def insert_trade_signal(self, tid: int, signal_id: int, ts: float, symbol: str,
                             side: str, rule: str, tier: str, confidence: float,
-                            entry: float, stop: float, target: float) -> None:
+                            entry: float, stop: float, target: float,
+                            entries_json: str = "", features_json: str = "") -> None:
         self._submit(
             "INSERT INTO trade_signals (id, signal_id, ts, symbol, side, rule, tier,"
-            " confidence, entry, stop, target) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            (tid, signal_id, ts, symbol, side, rule, tier, confidence, entry, stop, target),
+            " confidence, entry, stop, target, avg_entry, entries, filled, state,"
+            " features) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (tid, signal_id, ts, symbol, side, rule, tier, confidence, entry, stop,
+             target, entry, entries_json, 1, "INIT", features_json),
+        )
+
+    def update_trade_signal(self, tid: int, avg_entry: float, entries_json: str,
+                            filled: int, state: str, stop: float) -> None:
+        self._submit(
+            "UPDATE trade_signals SET avg_entry=?, entries=?, filled=?, state=?, stop=?"
+            " WHERE id=?",
+            (avg_entry, entries_json, filled, state, stop, tid),
         )
 
     def close_trade_signal(self, tid: int, status: str, exit_ts: float, exit_price: float,
-                           exit_reason: str, r_result: float) -> None:
+                           exit_reason: str, r_result: float, realized_r: float,
+                           state: str) -> None:
         self._submit(
             "UPDATE trade_signals SET status=?, exit_ts=?, exit_price=?, exit_reason=?,"
-            " r_result=? WHERE id=?",
-            (status, exit_ts, exit_price, exit_reason, r_result, tid),
+            " r_result=?, realized_r=?, state=? WHERE id=?",
+            (status, exit_ts, exit_price, exit_reason, r_result, realized_r, state, tid),
         )
+
+    def save_model(self, rule: str, state_json: str, n: int, updated: float) -> None:
+        self._submit(
+            "INSERT INTO model_state (rule, state, n, updated) VALUES (?,?,?,?)"
+            " ON CONFLICT(rule) DO UPDATE SET state=excluded.state, n=excluded.n,"
+            " updated=excluded.updated",
+            (rule, state_json, n, updated),
+        )
+
+    def load_models(self) -> dict[str, str]:
+        with self.read_conn() as conn:
+            rows = conn.execute("SELECT rule, state FROM model_state").fetchall()
+        return {r["rule"]: r["state"] for r in rows}
+
+    def resolved_feature_history(self) -> list[dict[str, Any]]:
+        """Resolved trades that captured entry features, oldest first (for refit)."""
+        with self.read_conn() as conn:
+            rows = conn.execute(
+                "SELECT rule, features, status FROM trade_signals"
+                " WHERE status IN ('win','loss') AND features IS NOT NULL AND features != ''"
+                " ORDER BY exit_ts",
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     def next_trade_signal_id(self) -> int:
         with self.read_conn() as conn:
@@ -155,11 +211,14 @@ class Db:
         outcome ever measured, not just post-upgrade trades."""
         h = haircut_bps / 1e4
         sql = f"""
-            SELECT rule, symbol, SUM(win) AS wins, COUNT(*) AS n FROM (
-                SELECT rule, symbol, (status = 'win') AS win
+            SELECT rule, symbol, SUM(win) AS wins, COUNT(*) AS n,
+                   SUM(COALESCE(r, 0)) AS r_sum, SUM(r IS NOT NULL) AS r_n
+            FROM (
+                SELECT rule, symbol, (status = 'win') AS win,
+                       COALESCE(realized_r, r_result) AS r
                   FROM trade_signals WHERE status IN ('win', 'loss')
                 UNION ALL
-                SELECT s.rule, s.symbol, (o.ret_5m > {h}) AS win
+                SELECT s.rule, s.symbol, (o.ret_5m > {h}) AS win, NULL AS r
                   FROM signals s JOIN outcomes o ON o.signal_id = s.id
                  WHERE o.ret_5m IS NOT NULL
                    AND s.id NOT IN (SELECT signal_id FROM trade_signals

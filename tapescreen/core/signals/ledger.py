@@ -1,15 +1,25 @@
-"""Trade-signal ledger: explicit entries/exits, win-loss tracking, learned confidence.
+"""Trade-signal ledger: laddered entries, BE/trailing management, learned confidence.
 
-Use: led = SignalLedger(cfg, db); led.on_rule_fire(ev, snap) -> TradeSignal | None;
-led.on_tick(tick) -> list[ExitEvent]. Screener only - it never places orders.
-Depends on: config, store.db, signals.base. Confidence is the Beta-posterior win
-probability of the signal's (rule, symbol) bucket, backing off to the rule bucket
-below min_bucket_n samples; every resolution updates the buckets, and rules with
-enough history get a bounded composite-weight multiplier (2 x P, clamped).
+Use: led = SignalLedger(cfg, db); led.on_rule_fire(ev, snap); led.on_tick(tick).
+Screener only - it never places orders; it simulates the trade plan it displays
+so every signal produces a measurable outcome the system can learn from.
+
+Trade plan (mirrors a scale-in style): tranche 1 at the signal print plus adds
+each entry_step_r below (long); R is quoted on the tranche-1-to-stop distance.
+At +tp1_r the plan banks tp1_fraction and moves the stop to break-even; at
++trail_start_r a trailing stop (trail_dist_r behind the best price) takes over;
+TIME closes anything left at max_hold_s. Exits: STOP | BE | TRAIL | TIME.
+
+Learning: per-rule Beta win-rate buckets (all history, incl. legacy outcomes)
+drive composite weight multipliers; a per-rule online logistic regression over
+the entry context (core.signals.models) predicts each signal's win probability,
+refits from the full stored trade history at boot, and updates on every
+resolution - the system sharpens continuously as outcomes accumulate.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 
@@ -17,19 +27,27 @@ from tapescreen.config import Config
 from tapescreen.core.events import Tick
 from tapescreen.core.features import FeatureSnapshot
 from tapescreen.core.signals.base import LONG, SHORT, SignalEvent
+from tapescreen.core.signals.models import OnlineLogistic
 from tapescreen.store.db import Db
 
 log = logging.getLogger("tapescreen.ledger")
 
-EXIT_TARGET = "TARGET"
 EXIT_STOP = "STOP"
+EXIT_BE = "BE"
+EXIT_TRAIL = "TRAIL"
 EXIT_TIME = "TIME"
+
+ST_INIT = "INIT"
+ST_BE = "BE"
+ST_TRAIL = "TRAIL"
 
 
 @dataclass(slots=True)
 class Bucket:
     wins: float = 0.0
     n: float = 0.0
+    r_sum: float = 0.0
+    r_n: float = 0.0
 
 
 @dataclass(slots=True)
@@ -41,66 +59,109 @@ class TradeSignal:
     side: str  # long | short
     rule: str
     tier: str
-    confidence: float  # 0..1 posterior win probability at entry
-    conf_n: int  # samples behind the confidence number
-    entry: float
-    stop: float
-    target: float
+    confidence: float  # 0..1 win probability at entry
+    conf_n: int
+    conf_src: str  # "model" | "bucket"
+    levels: list[dict]  # [{px, filled_ts|None}, ...] ladder, tranche 1 pre-filled
+    avg_entry: float
+    risk_unit: float  # price distance defining 1R (tranche 1 -> initial stop)
+    stop: float  # current stop (moves to BE, then trails)
+    stop_initial: float
+    state: str = ST_INIT
+    best_px: float = 0.0
+    tp1_done: bool = False
+    tp1_fraction: float = 1.0 / 3.0
+    realized: float = 0.0  # R banked by the TP1 partial
+    features: list[float] = field(default_factory=list)
     status: str = "open"  # open | win | loss
     exit_ts: float = 0.0
     exit_price: float = 0.0
     exit_reason: str = ""
-    r_result: float = 0.0
+    total_r: float = 0.0
     last_price: float = 0.0
-    extras: dict = field(default_factory=dict)
 
     @property
     def side_sign(self) -> float:
         return 1.0 if self.side == LONG else -1.0
 
+    @property
+    def filled(self) -> int:
+        return sum(1 for lv in self.levels if lv["filled_ts"] is not None)
+
+    def leg_r(self, px: float) -> float:
+        """R of the running leg at price px, measured off the average entry."""
+        if self.risk_unit <= 0:
+            return 0.0
+        return self.side_sign * (px - self.avg_entry) / self.risk_unit
+
     def live_r(self) -> float:
-        """Unrealized result in R units at last_price (0 until a tick arrives)."""
-        if self.last_price <= 0 or self.entry <= 0:
-            return 0.0
-        risk = abs(self.entry - self.stop)
-        if risk <= 0:
-            return 0.0
-        return self.side_sign * (self.last_price - self.entry) / risk
+        """Unrealized total R right now (banked partial + open leg)."""
+        if self.last_price <= 0:
+            return self.realized
+        frac = 1.0 - (self.tp1_fraction if self.tp1_done else 0.0)
+        return self.realized + frac * self.leg_r(self.last_price)
 
     def to_dict(self) -> dict:
         return {
             "id": self.id, "ts": self.ts, "symbol": self.symbol, "side": self.side,
             "rule": self.rule, "tier": self.tier,
             "confidence": round(self.confidence * 100, 1), "conf_n": self.conf_n,
-            "entry": self.entry, "stop": self.stop, "target": self.target,
-            "status": self.status, "exit_ts": self.exit_ts, "exit_price": self.exit_price,
-            "exit_reason": self.exit_reason, "r_result": round(self.r_result, 2),
-            "live_r": round(self.live_r(), 2),
+            "conf_src": self.conf_src,
+            "levels": [{"px": lv["px"], "filled": lv["filled_ts"] is not None}
+                       for lv in self.levels],
+            "avg_entry": self.avg_entry, "filled": self.filled,
+            "stop": self.stop, "state": self.state, "risk_unit": self.risk_unit,
+            "tp1_done": self.tp1_done, "realized": round(self.realized, 2),
+            "status": self.status, "exit_ts": self.exit_ts,
+            "exit_price": self.exit_price, "exit_reason": self.exit_reason,
+            "r_result": round(self.total_r, 2), "live_r": round(self.live_r(), 2),
         }
 
 
+def extract_features(ev: SignalEvent, s: FeatureSnapshot) -> list[float]:
+    """Entry-context vector, side-signed so 'edge toward the trade' is positive.
+    Order MUST match models.FEATURES."""
+    sign = 1.0 if ev.side == LONG else -1.0
+    price = s.price if s.price > 0 else 1.0
+    return [
+        s.vol_z,
+        s.tps_z,
+        sign * s.vwap_dist_sigma,
+        sign * (s.book_imbalance - 0.5) * 2.0,
+        sign * (s.agg_imbalance_60s - 0.5) * 2.0,
+        s.spread_bps,
+        -sign * s.funding * 1e4,
+        sign * (s.roc_5m / s.roc5m_sigma if s.roc5m_sigma > 1e-12 else 0.0),
+        s.atr_1m / price * 1e4,
+        sign * (s.rsi_14 - 50.0) / 50.0,
+        ev.strength,
+        min(1.0, ev.score / 100.0),
+    ]
+
+
 class SignalLedger:
-    """Opens a tracked trade signal per directional rule fire and resolves it."""
+    """Opens a laddered, managed trade plan per directional rule fire."""
 
     def __init__(self, cfg: Config, db: Db | None) -> None:
         self.cfg = cfg
         self.lc = cfg.learning
         self.db = db
         self.haircut = cfg.stats.spread_haircut_bps / 1e4
-        self.open: dict[str, list[TradeSignal]] = {}  # symbol -> open signals
-        self.resolved_recent: list[dict] = []  # newest last, capped for the UI ticker
+        self.open: dict[str, list[TradeSignal]] = {}
+        self.resolved_recent: list[dict] = []
         self.rule_buckets: dict[str, Bucket] = {}
-        self.pair_buckets: dict[tuple[str, str], Bucket] = {}  # (rule, symbol)
+        self.pair_buckets: dict[tuple[str, str], Bucket] = {}
+        self.models: dict[str, OnlineLogistic] = {}
         self._next_id = 1
         if db is not None:
             self._next_id = db.next_trade_signal_id()
             self._bootstrap(db)
+            if self.lc.model_enabled:
+                self._refit(db)
 
     # ------------------------------------------------------------- learning
 
     def _bootstrap(self, db: Db) -> None:
-        """Seed win-rate buckets from everything already measured (trade signals
-        resolved in prior sessions + the legacy outcomes table)."""
         try:
             rows = db.learning_buckets(self.cfg.stats.spread_haircut_bps)
         except Exception:
@@ -108,31 +169,70 @@ class SignalLedger:
             return
         for r in rows:
             wins, n = float(r["wins"] or 0), float(r["n"] or 0)
-            rb = self.rule_buckets.setdefault(r["rule"], Bucket())
-            rb.wins += wins
-            rb.n += n
-            pb = self.pair_buckets.setdefault((r["rule"], r["symbol"]), Bucket())
-            pb.wins += wins
-            pb.n += n
+            r_sum, r_n = float(r.get("r_sum") or 0), float(r.get("r_n") or 0)
+            for b in (self.rule_buckets.setdefault(r["rule"], Bucket()),
+                      self.pair_buckets.setdefault((r["rule"], r["symbol"]), Bucket())):
+                b.wins += wins
+                b.n += n
+                b.r_sum += r_sum
+                b.r_n += r_n
         total = sum(b.n for b in self.rule_buckets.values())
         log.info("learning bootstrapped from %d resolved outcomes across %d rules",
                  int(total), len(self.rule_buckets))
 
+    def _refit(self, db: Db) -> None:
+        """Rebuild the per-rule models from the full stored trade history.
+
+        Models are refit from scratch each boot (persisted state is for
+        inspection only), so history is never double-counted."""
+        try:
+            rows = db.resolved_feature_history()
+        except Exception:
+            log.exception("model refit failed; starting fresh")
+            return
+        samples: dict[str, list[tuple[list[float], bool]]] = {}
+        for r in rows:
+            try:
+                x = [float(v) for v in json.loads(r["features"])]
+            except (ValueError, TypeError):
+                continue
+            samples.setdefault(r["rule"], []).append((x, r["status"] == "win"))
+        for rule, data in samples.items():
+            m = self._model(rule)
+            for _ in range(max(1, self.lc.refit_epochs)):
+                for x, won in data:
+                    m.update(x, won)
+            m.n = len(data)  # n reflects distinct samples, not epoch passes
+        if samples:
+            log.info("models refit: %s",
+                     {r: len(d) for r, d in samples.items()})
+
+    def _model(self, rule: str) -> OnlineLogistic:
+        m = self.models.get(rule)
+        if m is None:
+            m = OnlineLogistic(self.lc.model_lr, self.lc.model_l2)
+            self.models[rule] = m
+        return m
+
     def _posterior(self, b: Bucket) -> float:
         return (b.wins + self.lc.prior_wins) / (b.n + self.lc.prior_wins + self.lc.prior_losses)
 
-    def confidence(self, rule: str, symbol: str) -> tuple[float, int]:
-        """(posterior win probability, samples) for a prospective signal."""
+    def confidence(self, rule: str, symbol: str,
+                   features: list[float] | None = None) -> tuple[float, int, str]:
+        """(win probability, samples, source) - model when trained, else buckets."""
+        if (self.lc.model_enabled and features is not None):
+            m = self.models.get(rule)
+            if m is not None and m.n >= self.lc.model_min_n:
+                return m.predict(features), m.n, "model"
         pair = self.pair_buckets.get((rule, symbol))
         if pair is not None and pair.n >= self.lc.min_bucket_n:
-            return self._posterior(pair), int(pair.n)
+            return self._posterior(pair), int(pair.n), "bucket"
         rb = self.rule_buckets.get(rule)
         if rb is not None and rb.n > 0:
-            return self._posterior(rb), int(rb.n)
-        return self._posterior(Bucket()), 0
+            return self._posterior(rb), int(rb.n), "bucket"
+        return self._posterior(Bucket()), 0, "bucket"
 
     def rule_multiplier(self, rule: str) -> float:
-        """Learned composite-weight multiplier: 2 x P clamped, 1.0 until weight_min_n."""
         if not self.lc.enabled:
             return 1.0
         rb = self.rule_buckets.get(rule)
@@ -143,18 +243,20 @@ class SignalLedger:
     def learning_snapshot(self) -> list[dict]:
         out = []
         for rule, b in sorted(self.rule_buckets.items()):
+            m = self.models.get(rule)
             out.append({
                 "rule": rule, "n": int(b.n),
                 "win_rate": round(b.wins / b.n * 100, 1) if b.n else None,
+                "avg_r": round(b.r_sum / b.r_n, 2) if b.r_n else None,
                 "confidence": round(self._posterior(b) * 100, 1),
                 "weight_mult": round(self.rule_multiplier(rule), 2),
+                "model_n": m.n if m else 0,
             })
         return out
 
     # ------------------------------------------------------------- lifecycle
 
     def on_rule_fire(self, ev: SignalEvent, snap: FeatureSnapshot) -> TradeSignal | None:
-        """Open a tracked trade signal for a directional rule fire (entry event)."""
         if ev.side not in (LONG, SHORT):
             return None
         entry = float(ev.snapshot.get("price") or snap.price)
@@ -163,7 +265,7 @@ class SignalLedger:
         if self.lc.one_per_side and any(
             t.side == ev.side for t in self.open.get(ev.symbol, ())
         ):
-            return None  # one active signal per (symbol, side): no board flooding
+            return None
 
         atr = snap.atr_1m if snap.atr_1m > 0 else entry * 0.001
         inv = float(ev.snapshot.get("invalidation") or 0.0)
@@ -174,24 +276,34 @@ class SignalLedger:
         dist = min(self.lc.stop_atr_max * atr, max(self.lc.stop_atr_min * atr, dist))
         sign = 1.0 if ev.side == LONG else -1.0
         stop = entry - sign * dist
-        target = entry + sign * dist * self.lc.target_r
 
-        conf, conf_n = self.confidence(ev.rule, ev.symbol)
-        sig_id_val = int(ev.snapshot.get("_db_id", 0))
+        levels = [{"px": entry, "filled_ts": ev.ts}]
+        for i in range(1, max(1, self.lc.entry_levels)):
+            levels.append({"px": entry - sign * dist * self.lc.entry_step_r * i,
+                           "filled_ts": None})
+
+        features = extract_features(ev, snap)
+        conf, conf_n, conf_src = self.confidence(ev.rule, ev.symbol, features)
         ts = TradeSignal(
-            id=self._next_id, signal_id=sig_id_val, ts=ev.ts, symbol=ev.symbol,
-            side=ev.side, rule=ev.rule, tier=ev.tier, confidence=conf, conf_n=conf_n,
-            entry=entry, stop=stop, target=target, last_price=entry,
+            id=self._next_id, signal_id=int(ev.snapshot.get("_db_id", 0)), ts=ev.ts,
+            symbol=ev.symbol, side=ev.side, rule=ev.rule, tier=ev.tier,
+            confidence=conf, conf_n=conf_n, conf_src=conf_src,
+            levels=levels, avg_entry=entry, risk_unit=dist,
+            stop=stop, stop_initial=stop, best_px=entry,
+            tp1_fraction=self.lc.tp1_fraction,
+            features=features, last_price=entry,
         )
         self._next_id += 1
         self.open.setdefault(ev.symbol, []).append(ts)
         if self.db is not None:
-            self.db.insert_trade_signal(ts.id, ts.signal_id, ts.ts, ts.symbol, ts.side,
-                                        ts.rule, ts.tier, conf, entry, stop, target)
+            self.db.insert_trade_signal(
+                ts.id, ts.signal_id, ts.ts, ts.symbol, ts.side, ts.rule, ts.tier,
+                conf, entry, stop, 0.0,
+                entries_json=json.dumps(ts.levels), features_json=json.dumps(features),
+            )
         return ts
 
     def on_tick(self, t: Tick) -> list[TradeSignal]:
-        """Advance open signals on a trade print; returns any that just exited."""
         sigs = self.open.get(t.symbol)
         if not sigs:
             return []
@@ -200,47 +312,103 @@ class SignalLedger:
             ts.last_price = t.price
             if t.ts_recv < ts.ts:
                 continue
-            if ts.side == LONG:
-                hit_stop = t.price <= ts.stop
-                hit_target = t.price >= ts.target
-            else:
-                hit_stop = t.price >= ts.stop
-                hit_target = t.price <= ts.target
-            if hit_stop:
-                self._resolve(ts, t.ts_recv, ts.stop, EXIT_STOP)
-            elif hit_target:
-                self._resolve(ts, t.ts_recv, ts.target, EXIT_TARGET)
-            elif t.ts_recv - ts.ts >= self.lc.max_hold_s:
-                self._resolve(ts, t.ts_recv, t.price, EXIT_TIME)
-            if ts.status != "open":
+            changed = self._fill_ladder(ts, t)
+            if self._check_exit(ts, t):
                 exited.append(ts)
+                continue
+            if self._manage(ts, t):
+                changed = True
+            if changed and self.db is not None:
+                self.db.update_trade_signal(ts.id, ts.avg_entry, json.dumps(ts.levels),
+                                            ts.filled, ts.state, ts.stop)
         if exited:
             self.open[t.symbol] = [s for s in sigs if s.status == "open"]
         return exited
 
+    def _fill_ladder(self, ts: TradeSignal, t: Tick) -> bool:
+        """Adds fill when price trades through their level inside the entry window."""
+        if t.ts_recv - ts.ts > self.lc.entry_window_s:
+            return False
+        changed = False
+        for lv in ts.levels:
+            if lv["filled_ts"] is not None:
+                continue
+            hit = t.price <= lv["px"] if ts.side == LONG else t.price >= lv["px"]
+            if hit:
+                lv["filled_ts"] = t.ts_recv
+                changed = True
+        if changed:
+            filled = [lv["px"] for lv in ts.levels if lv["filled_ts"] is not None]
+            ts.avg_entry = sum(filled) / len(filled)
+        return changed
+
+    def _check_exit(self, ts: TradeSignal, t: Tick) -> bool:
+        hit_stop = t.price <= ts.stop if ts.side == LONG else t.price >= ts.stop
+        if hit_stop:
+            reason = {ST_INIT: EXIT_STOP, ST_BE: EXIT_BE, ST_TRAIL: EXIT_TRAIL}[ts.state]
+            self._resolve(ts, t.ts_recv, ts.stop, reason)
+            return True
+        if t.ts_recv - ts.ts >= self.lc.max_hold_s:
+            self._resolve(ts, t.ts_recv, t.price, EXIT_TIME)
+            return True
+        return False
+
+    def _manage(self, ts: TradeSignal, t: Tick) -> bool:
+        """Break-even + trailing management on the open leg. Returns True on change."""
+        changed = False
+        sign = ts.side_sign
+        better = (t.price > ts.best_px) if ts.side == LONG else (t.price < ts.best_px)
+        if better:
+            ts.best_px = t.price
+        r_now = ts.leg_r(t.price)
+        if not ts.tp1_done and r_now >= self.lc.tp1_r:
+            ts.tp1_done = True
+            ts.realized = ts.tp1_fraction * self.lc.tp1_r
+            ts.state = ST_BE
+            ts.stop = ts.avg_entry  # worst case from here: banked partial, flat leg
+            changed = True
+        if ts.state != ST_TRAIL and ts.leg_r(ts.best_px) >= self.lc.trail_start_r:
+            ts.state = ST_TRAIL
+            changed = True
+        if ts.state == ST_TRAIL:
+            trail = ts.best_px - sign * self.lc.trail_dist_r * ts.risk_unit
+            tighter = (trail > ts.stop) if ts.side == LONG else (trail < ts.stop)
+            if tighter:
+                ts.stop = trail
+                changed = True
+        return changed
+
     def _resolve(self, ts: TradeSignal, exit_ts: float, exit_price: float, reason: str) -> None:
-        risk = abs(ts.entry - ts.stop)
-        signed_ret = ts.side_sign * (exit_price / ts.entry - 1.0)
+        frac = 1.0 - (ts.tp1_fraction if ts.tp1_done else 0.0)
+        leg = ts.leg_r(exit_price)
+        ts.total_r = ts.realized + frac * leg
         ts.exit_ts = exit_ts
         ts.exit_price = exit_price
         ts.exit_reason = reason
-        ts.r_result = ts.side_sign * (exit_price - ts.entry) / risk if risk > 0 else 0.0
-        win = signed_ret > self.haircut  # same net-of-haircut test the stats use
-        ts.status = "win" if win else "loss"
+        # win test net of the spread haircut, converted into R-space
+        haircut_r = self.haircut / (ts.risk_unit / ts.avg_entry) if ts.risk_unit > 0 else 0.0
+        won = ts.total_r > haircut_r
+        ts.status = "win" if won else "loss"
 
-        rb = self.rule_buckets.setdefault(ts.rule, Bucket())
-        rb.wins += 1.0 if win else 0.0
-        rb.n += 1.0
-        pb = self.pair_buckets.setdefault((ts.rule, ts.symbol), Bucket())
-        pb.wins += 1.0 if win else 0.0
-        pb.n += 1.0
+        for b in (self.rule_buckets.setdefault(ts.rule, Bucket()),
+                  self.pair_buckets.setdefault((ts.rule, ts.symbol), Bucket())):
+            b.wins += 1.0 if won else 0.0
+            b.n += 1.0
+            b.r_sum += ts.total_r
+            b.r_n += 1.0
+
+        if self.lc.model_enabled and ts.features:
+            m = self._model(ts.rule)
+            m.update(ts.features, won)
+            if self.db is not None:
+                self.db.save_model(ts.rule, json.dumps(m.to_state()), m.n, exit_ts)
 
         self.resolved_recent.append(ts.to_dict())
         if len(self.resolved_recent) > 60:
             del self.resolved_recent[0]
         if self.db is not None:
             self.db.close_trade_signal(ts.id, ts.status, exit_ts, exit_price, reason,
-                                       ts.r_result)
+                                       ts.total_r, ts.total_r, ts.state)
 
     def active(self) -> list[dict]:
         out = []
