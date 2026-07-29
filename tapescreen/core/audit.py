@@ -86,6 +86,7 @@ class Auditor:
 
         checks += self._check_ledger(failures)
         checks += self._check_learning(failures)
+        checks += self._check_research(failures)
         checks += self._check_scores(failures)
         checks += self._check_db(now, failures)
         checks += self._check_feed(now, failures)
@@ -202,6 +203,25 @@ class Auditor:
             checks += 1
             if not all(math.isfinite(w) for w in [*m.w, m.b]):
                 out.append(f"logic:model {rule}: non-finite weights")
+        return checks
+
+    def _check_research(self, out: list[str]) -> int:
+        desk = self.engine.research
+        if desk is None:
+            return 0
+        from tapescreen.core.research import CANDIDATES
+        checks = 1
+        if not (set(desk.active_extras) <= set(CANDIDATES)
+                and len(desk.active_extras) <= self.cfg.research.max_extras):
+            out.append(f"logic:research: invalid promoted set {desk.active_extras}")
+        checks += 1
+        if desk.active_extras != self.engine.ledger.extra_names:
+            out.append("logic:research: desk extras out of sync with ledger models")
+        checks += 1
+        known = set(self.engine.ledger.rule_buckets)
+        if not set(desk.probation) <= known and known:
+            out.append(f"logic:research: probation on unknown rule "
+                       f"{set(desk.probation) - known}")
         return checks
 
     def _check_scores(self, out: list[str]) -> int:

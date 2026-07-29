@@ -8,93 +8,166 @@
 <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
-<header id="topbar">
-  <div id="brand">Tape<span>Screen</span> <em id="ver"></em></div>
-  <nav id="tabs">
-    <button class="tab active" data-tab="screen">Screen</button>
-    <button class="tab" data-tab="stats">Stats</button>
+
+<aside id="side">
+  <div id="brand"><span class="logo">◈</span>Tape<span>Screen</span><em id="ver"></em></div>
+  <nav id="nav">
+    <button class="nav-item active" data-view="dash"><i>▦</i>Dashboard</button>
+    <button class="nav-item" data-view="stats"><i>≣</i>Signal Stats</button>
   </nav>
-  <div id="statusbar">
-    <span class="st" id="st-conn"><i class="dot"></i><b>feed</b></span>
-    <span class="st"><b id="st-rate">0</b><u>msg/s</u></span>
-    <span class="st" title="exchange → this machine, incl. clock skew"><b id="st-ingest">–</b><u>ingest</u></span>
-    <span class="st" title="trade tick → your screen"><b id="st-pipe">–</b><u>tick→ui</u></span>
-    <span class="st"><b id="st-drops">0</b><u>drops</u></span>
-    <span class="st" id="st-audit" title="continuous self-verification"><b>–</b><u>audit</u></span>
-    <span class="st"><b id="st-uptime">0s</b><u>uptime</u></span>
+  <div class="side-sec">
+    <h4>Layout</h4>
+    <div id="card-toggles"></div>
+    <button id="layout-reset">reset layout</button>
+    <p class="side-hint">drag a card by ⠿ to reorder · drag the corner to resize</p>
+  </div>
+  <div class="side-sec" id="side-status">
+    <h4>Status</h4>
+    <div class="srow" id="st-conn"><i class="dot"></i><b>feed</b><u id="st-venue"></u></div>
+    <div class="srow"><b id="st-rate">0</b><u>msg/s</u></div>
+    <div class="srow" title="exchange → this machine, incl. clock skew"><b id="st-ingest">–</b><u>ingest</u></div>
+    <div class="srow" title="trade tick → your screen"><b id="st-pipe">–</b><u>tick→ui</u></div>
+    <div class="srow"><b id="st-drops">0</b><u>drops</u></div>
+    <div class="srow" id="st-audit" title="continuous self-verification"><b>–</b><u>audit</u></div>
+    <div class="srow"><b id="st-uptime">0s</b><u>uptime</u></div>
+  </div>
+  <div id="side-foot">
     <button id="help-toggle" title="what does everything mean?">?</button>
     <button id="sound-toggle" title="sound on new signals; double-beep on ALERT tier">🔇</button>
   </div>
-</header>
+</aside>
 
-<main id="view-screen">
-  <section id="left-pane">
-    <div id="grid-wrap">
-      <table id="grid">
-        <thead>
-          <tr>
-            <th class="ta-l"><i>market</i></th>
-            <th><i>price</i><u>last trade</u></th>
-            <th><i>1m</i><u>change</u></th>
-            <th><i>5m</i><u>change</u></th>
-            <th><i>15m</i><u>change</u></th>
-            <th title="how unusual current volume is: 0 = normal, +3 = extreme burst"><i>vol z</i><u>vs normal</u></th>
-            <th title="cumulative buy volume minus sell volume, last 5 minutes"><i>flow</i><u>cvd · 5m</u></th>
-            <th title="share of resting orders on the bid side of the book (top 10 levels)"><i>depth</i><u>bid share</u></th>
-            <th title="bid-ask spread in basis points (1bp = 0.01%)"><i>spread</i><u>bp</u></th>
-            <th title="hourly funding rate; bold = at a 7-day extreme"><i>funding</i><u>bp/hr</u></th>
-            <th title="open-interest change over 5 minutes, in contracts/base units"><i>ΔOI</i><u>5 min</u></th>
-            <th title="bullish rule confluence, 0-100"><i>long</i><u>score</u></th>
-            <th title="bearish rule confluence, 0-100"><i>short</i><u>score</u></th>
-          </tr>
-        </thead>
-        <tbody id="grid-body"></tbody>
-      </table>
-    </div>
-    <div id="think-pane">
-      <div id="think-head">
-        <div id="think-title">SYSTEM REASONING<u>live decision log — the thinking behind every action</u></div>
+<main id="main">
+<div id="view-dash">
+  <div id="cards">
+
+    <section class="dcard" data-card="perf" data-w="8" data-h="6">
+      <header><span class="grab" title="drag to reorder">⠿</span>
+        <div class="ct"><h3>Session Performance</h3><u>simulated trade plans · last 24h · R units</u></div>
+        <button class="hide-btn" title="hide card">×</button>
+      </header>
+      <div class="cbody" id="perf-body">
+        <div id="hero-tiles">
+          <div class="tile main"><div class="v" id="h-netr">–</div><div class="k">net R · 24h</div></div>
+          <div class="tile"><div class="v" id="h-wr">–</div><div class="k">win rate</div></div>
+          <div class="tile"><div class="v" id="h-exp">–</div><div class="k">avg R / trade</div></div>
+          <div class="tile"><div class="v" id="h-trades">–</div><div class="k">trades</div></div>
+          <div class="tile"><div class="v" id="h-open">–</div><div class="k">open now</div></div>
+        </div>
+        <div id="equity-wrap"><canvas id="equity"></canvas><div id="equity-empty">cumulative R appears here as trades resolve</div></div>
+      </div>
+    </section>
+
+    <section class="dcard" data-card="board" data-w="4" data-h="6">
+      <header><span class="grab">⠿</span>
+        <div class="ct"><h3>Live Trade Signals</h3><u id="board-count">bigger &amp; greener = higher measured win probability</u></div>
+        <button class="hide-btn">×</button>
+      </header>
+      <div class="cbody" id="board-cards"><div id="board-empty">
+        <b>no active signals</b>
+        <p>rules are armed — a card appears the moment a setup fires.</p>
+      </div></div>
+    </section>
+
+    <section class="dcard" data-card="markets" data-w="8" data-h="8">
+      <header><span class="grab">⠿</span>
+        <div class="ct"><h3>Markets</h3><u>13 hyperliquid perps · click a row for the chart</u></div>
+        <button class="hide-btn">×</button>
+      </header>
+      <div class="cbody pad0">
+        <table id="grid">
+          <thead>
+            <tr>
+              <th class="ta-l"><i>market</i></th>
+              <th><i>price</i><u>last trade</u></th>
+              <th><i>1m</i><u>change</u></th>
+              <th><i>5m</i><u>change</u></th>
+              <th><i>15m</i><u>change</u></th>
+              <th title="how unusual current volume is: 0 = normal, +3 = extreme burst"><i>vol z</i><u>vs normal</u></th>
+              <th title="cumulative buy volume minus sell volume, last 5 minutes"><i>flow</i><u>cvd · 5m</u></th>
+              <th title="share of resting orders on the bid side of the book (top 10 levels)"><i>depth</i><u>bid share</u></th>
+              <th title="bid-ask spread in basis points (1bp = 0.01%)"><i>spread</i><u>bp</u></th>
+              <th title="hourly funding rate; bold = at a 7-day extreme"><i>funding</i><u>bp/hr</u></th>
+              <th title="open-interest change over 5 minutes"><i>ΔOI</i><u>5 min</u></th>
+              <th title="bullish rule confluence, 0-100"><i>long</i><u>score</u></th>
+              <th title="bearish rule confluence, 0-100"><i>short</i><u>score</u></th>
+            </tr>
+          </thead>
+          <tbody id="grid-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="dcard" data-card="completed" data-w="4" data-h="8">
+      <header><span class="grab">⠿</span>
+        <div class="ct"><h3>Completed</h3><u>newest first · <span id="ticker-tally" title="wins / losses this session"></span></u></div>
+        <button class="hide-btn">×</button>
+      </header>
+      <div class="cbody"><ol id="ticker"></ol></div>
+    </section>
+
+    <section class="dcard" data-card="reason" data-w="8" data-h="7">
+      <header><span class="grab">⠿</span>
+        <div class="ct"><h3>System Reasoning</h3><u>live decision log — the thinking behind every action</u></div>
         <div id="think-filters">
           <button class="tf-chip active" data-cat="all">all</button>
           <button class="tf-chip" data-cat="signal" title="rule logic: what fired, what was suppressed, the score math">signals</button>
           <button class="tf-chip" data-cat="trade" title="trade management: ladders, break-even, trailing, exits">trades</button>
           <button class="tf-chip" data-cat="learning" title="what each finished trade changed: records, weights, ML model">learning</button>
+          <button class="tf-chip" data-cat="research" title="quant desk: variable promotions, probation, exploration">desk</button>
           <button class="tf-chip" data-cat="audit" title="continuous self-verification and quarantine decisions">audit</button>
         </div>
-        <span id="think-paused" hidden>⏸ paused while you read — move the mouse away to resume</span>
-        <button id="think-collapse" title="collapse / expand the reasoning log">▾</button>
+        <span id="think-paused" hidden>⏸ paused while you read</span>
+        <button class="hide-btn">×</button>
+      </header>
+      <div class="cbody">
+        <ol id="think-feed"><li id="think-empty">the system narrates every decision here the moment it makes one — rule fires and suppressions, stop construction, trade management, desk research, and what each finished trade taught it.</li></ol>
       </div>
-      <ol id="think-feed"><li id="think-empty">the system narrates every decision here the moment it makes one — rule fires and suppressions, stop construction, break-even and trailing moves, and what each finished trade taught it.</li></ol>
-    </div>
-    <footer id="learn-strip">
-      <div id="learn-title">SYSTEM LEARNING<u>measured win rates per strategy</u></div>
-      <div id="learn-meters"></div>
-    </footer>
-  </section>
+    </section>
 
-  <aside id="board-pane">
-    <div id="board-head">
-      <h2>LIVE TRADE SIGNALS</h2>
-      <span id="board-count"></span>
-      <span id="ticker-tally" title="wins / losses this session"></span>
-    </div>
-    <div id="board-cards"><div id="board-empty">
-      <b>no active signals</b>
-      <p>rules are armed — a card appears here the moment a setup fires.<br>
-      bigger &amp; greener card = higher measured win probability.</p>
-    </div></div>
-    <div id="ticker-head"><h2>COMPLETED</h2><span class="hint">newest first</span></div>
-    <ol id="ticker"></ol>
-  </aside>
-</main>
+    <section class="dcard" data-card="desk" data-w="4" data-h="7">
+      <header><span class="grab">⠿</span>
+        <div class="ct"><h3>Quant Desk</h3><u>the panel that reviews every outcome</u></div>
+        <button class="hide-btn">×</button>
+      </header>
+      <div class="cbody" id="desk-body"><p class="empty-note">the desk convenes after new outcomes resolve</p></div>
+    </section>
 
-<main id="view-stats" hidden>
+    <section class="dcard" data-card="learn" data-w="8" data-h="5">
+      <header><span class="grab">⠿</span>
+        <div class="ct"><h3>Strategy Learning</h3><u>measured win rates per strategy — earned, not assumed</u></div>
+        <button class="hide-btn">×</button>
+      </header>
+      <div class="cbody"><div id="learn-meters"></div></div>
+    </section>
+
+    <section class="dcard" data-card="vars" data-w="4" data-h="5">
+      <header><span class="grab">⠿</span>
+        <div class="ct"><h3>Tracked Variables</h3><u>the model grows its own inputs from evidence</u></div>
+        <button class="hide-btn">×</button>
+      </header>
+      <div class="cbody" id="vars-body"></div>
+    </section>
+
+    <section class="dcard" data-card="health" data-w="12" data-h="4">
+      <header><span class="grab">⠿</span>
+        <div class="ct"><h3>System Health</h3><u>self-verified every 30s — data and logic, cross-checked</u></div>
+        <button class="hide-btn">×</button>
+      </header>
+      <div class="cbody" id="health-body"></div>
+    </section>
+
+  </div>
+</div>
+
+<div id="view-stats" hidden>
   <div id="stats-wrap">
     <div id="stats-totals"></div>
     <h2>by rule</h2><div id="stats-rule"></div>
     <h2>by symbol</h2><div id="stats-symbol"></div>
     <p class="note">hit = signed forward return &gt; spread haircut. Signal quality is measured here, not assumed.</p>
   </div>
+</div>
 </main>
 
 <div id="drawer" hidden>
@@ -115,45 +188,46 @@
     <div id="help-head"><h2>Reading this dashboard</h2><button id="help-close">✕</button></div>
     <div class="help-cols">
       <section>
-        <h3>Signal cards (right panel)</h3>
+        <h3>Session Performance</h3>
+        <dl>
+          <dt>net R / win rate / avg R</dt><dd>Results of the simulated trade plans over the last 24h, in R units (1R = distance from entry to stop). The curve is cumulative R as trades resolve. Simulated plans, not orders — this tool never trades.</dd>
+        </dl>
+        <h3>Signal cards</h3>
         <dl>
           <dt>Card size &amp; color</dt><dd>Conviction. Bigger, greener cards = higher measured win probability. Gray = below coin-flip odds.</dd>
-          <dt>Win probability ring</dt><dd>Chance this signal ends profitable, learned from every past signal of the same strategy (n = how many). "model" = the machine-learning estimate for these exact market conditions; "history" = the strategy's overall record.</dd>
-          <dt>Entry ladder E1·E2·E3</dt><dd>Scale-in plan: first entry at the signal, two more orders at better prices. A filled dot = that level traded. Your average entry updates as rungs fill.</dd>
-          <dt>Trade gauge</dt><dd>Where price sits right now between the stop (left) and profit territory (right). The dot is live price, in R units (1R = distance from entry to stop).</dd>
-          <dt>BE / TRAIL chips</dt><dd>Automatic management: at +1R a third of the position is banked and the stop moves to break-even (BE). At +1.5R the stop trails 1R behind the best price (TRAIL).</dd>
-          <dt>banked</dt><dd>Profit already secured by the +1R partial, in R.</dd>
-          <dt>live R</dt><dd>Total open result right now, in R units.</dd>
-          <dt>Time bar</dt><dd>How long the trade has been open, out of the 2-hour maximum.</dd>
+          <dt>Win probability ring</dt><dd>Chance this signal ends profitable, learned from every past signal of the same strategy. "model" = the ML estimate for these exact conditions; "history" = the strategy's record.</dd>
+          <dt>Entry ladder E1·E2·E3</dt><dd>Scale-in plan: first entry at the signal, adds at better prices. Filled dot = that level traded.</dd>
+          <dt>Trade gauge</dt><dd>Live price between the stop (left) and profit territory (right), in R units.</dd>
+          <dt>BE / TRAIL chips</dt><dd>At +1R a third is banked and the stop moves to break-even. From +1.5R the stop trails 1R behind the best price.</dd>
+          <dt>explore chip</dt><dd>Opened through the probation exploration quota: the strategy is gated, but the desk keeps a controlled trickle of trades so it can earn its way back.</dd>
+        </dl>
+        <h3>Quant Desk &amp; Tracked Variables</h3>
+        <dl>
+          <dt>Quant Desk</dt><dd>A deterministic panel that reviews every resolved outcome: a performance analyst (expectancy per strategy), a risk officer (weak strategies go on probation behind a higher confidence bar), a feature scout (see below) and a loop-breaker that guarantees exploration so gating can never starve a strategy of data.</dd>
+          <dt>Tracked Variables</dt><dd>The model starts with 12 base inputs. The scout measures candidate variables (time of day, funding percentile, squeeze regime, OI thrust…) against every outcome; when one shows real predictive correlation it is PROMOTED into the models — the system discovers its own new data points. Variables whose evidence decays are retired.</dd>
         </dl>
       </section>
       <section>
-        <h3>Market table (left)</h3>
+        <h3>Markets table</h3>
         <dl>
-          <dt>vol z</dt><dd>How unusual current trading volume is vs the last 30 minutes. 0 = normal, +2.5 = strong burst, the level rules look for.</dd>
-          <dt>flow (CVD)</dt><dd>Buying minus selling pressure over 5 minutes. Rising line = buyers in control.</dd>
-          <dt>depth</dt><dd>Share of resting orders sitting on the bid. Above 0.65 = heavy buy-side wall.</dd>
-          <dt>spread</dt><dd>Cost to cross the book, in basis points. Tight spread = cheap to trade.</dd>
-          <dt>funding</dt><dd>Hourly rate longs pay shorts (positive) or shorts pay longs (negative). Bold = 7-day extreme, a crowding signal.</dd>
-          <dt>ΔOI</dt><dd>Change in open interest: rising = new positions entering.</dd>
-          <dt>long / short score</dt><dd>How many bullish/bearish rules agree right now, 0–100. 60+ = watch, 80+ = alert.</dd>
-          <dt>warm · stale · qtn</dt><dd>warm: statistics still warming up (~30 min after start, no signals yet). stale: no trades for 30s. qtn: data failed a self-audit check — signals suspended for that market.</dd>
+          <dt>vol z</dt><dd>How unusual current volume is vs the last 30 minutes. 0 = normal, +2.5 = strong burst.</dd>
+          <dt>flow (CVD)</dt><dd>Buying minus selling pressure over 5 minutes.</dd>
+          <dt>depth</dt><dd>Share of resting orders on the bid. Above 0.65 = heavy buy-side wall.</dd>
+          <dt>funding</dt><dd>Hourly rate longs pay shorts (+) or shorts pay longs (−). Bold = 7-day extreme.</dd>
+          <dt>long / short score</dt><dd>Rule confluence 0–100. 60+ = watch, 80+ = alert.</dd>
+          <dt>warm · stale · qtn</dt><dd>warm: statistics warming (~30 min). stale: no trades 30s. qtn: failed a self-audit — signals suspended.</dd>
+        </dl>
+        <h3>System Reasoning</h3>
+        <dl>
+          <dt>What it is</dt><dd>The system narrating its decisions in real time with the actual numbers: why each signal fired or was held back, how stops and ladders were built, every management move, what each outcome taught it, and every desk action. This is how you verify the logic instead of trusting it.</dd>
+        </dl>
+        <h3>Layout</h3>
+        <dl>
+          <dt>Customize</dt><dd>Drag ⠿ to reorder cards, drag a card's corner to resize, × to hide (restore from the sidebar). Your layout is saved in this browser.</dd>
         </dl>
         <h3>Completed list</h3>
         <dl>
-          <dt>WIN / LOSS ± R</dt><dd>Final result in R. Exit reason: TARGET-less system — STOP (initial stop hit), BE (break-even stop after banking), TRAIL (trailing stop, usually a win), TIME (2-hour limit).</dd>
-        </dl>
-        <h3>System reasoning (live decision log)</h3>
-        <dl>
-          <dt>What it is</dt><dd>The system narrating its own decisions in real time, with the actual numbers: why each signal fired (and why one was held back), how every stop and entry ladder was constructed, each break-even / trailing-stop move, and exactly what it learned from every finished trade. This is how you verify the logic instead of trusting it blindly.</dd>
-          <dt>signal</dt><dd>Rule logic — the evidence behind a fire, the score math (weight × learned multiplier × strength), tier grading, cooldown suppressions.</dd>
-          <dt>trade</dt><dd>Trade management — ladder fills with the improving average entry, +1R banking, break-even and trailing decisions, exits with the full R accounting.</dd>
-          <dt>learning</dt><dd>Self-improvement — how the finished trade moved the strategy's measured record, its score weight, and the ML model's prediction for the same setup.</dd>
-          <dt>audit</dt><dd>Self-verification — periodic proof that data and logic checks pass, plus quarantine decisions when they don't.</dd>
-        </dl>
-        <h3>Bottom strip</h3>
-        <dl>
-          <dt>win rate / avg R / w× / ml</dt><dd>Per strategy: measured win %, average R per signal (expectancy), the learned weight multiplier applied to its score, and how many samples the ML model has trained on.</dd>
+          <dt>WIN / LOSS ± R</dt><dd>Final result in R. STOP (initial stop), BE (break-even after banking), TRAIL (trailing stop), TIME (2-hour limit).</dd>
         </dl>
       </section>
     </div>

@@ -75,6 +75,10 @@ CREATE TABLE IF NOT EXISTS model_state (
     n       INTEGER NOT NULL,
     updated REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS research_state (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS thoughts (
     id       INTEGER PRIMARY KEY,
     ts       REAL NOT NULL,
@@ -95,6 +99,7 @@ _TRADE_SIGNAL_UPGRADES = {
     "state": "TEXT",      # INIT | BE | TRAIL
     "realized_r": "REAL",
     "features": "TEXT",   # JSON entry-context vector for the online model
+    "candidates": "TEXT",  # JSON {name: value} research-candidate variables at entry
 }
 
 _SENTINEL: Any = object()
@@ -160,13 +165,14 @@ class Db:
     def insert_trade_signal(self, tid: int, signal_id: int, ts: float, symbol: str,
                             side: str, rule: str, tier: str, confidence: float,
                             entry: float, stop: float, target: float,
-                            entries_json: str = "", features_json: str = "") -> None:
+                            entries_json: str = "", features_json: str = "",
+                            candidates_json: str = "") -> None:
         self._submit(
             "INSERT INTO trade_signals (id, signal_id, ts, symbol, side, rule, tier,"
             " confidence, entry, stop, target, avg_entry, entries, filled, state,"
-            " features) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " features, candidates) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (tid, signal_id, ts, symbol, side, rule, tier, confidence, entry, stop,
-             target, entry, entries_json, 1, "INIT", features_json),
+             target, entry, entries_json, 1, "INIT", features_json, candidates_json),
         )
 
     def update_trade_signal(self, tid: int, avg_entry: float, entries_json: str,
@@ -235,14 +241,39 @@ class Db:
         return {r["rule"]: r["state"] for r in rows}
 
     def resolved_feature_history(self) -> list[dict[str, Any]]:
-        """Resolved trades that captured entry features, oldest first (for refit)."""
+        """Resolved trades that captured entry features, oldest first (for refit
+        and for the research desk's candidate-variable scouting)."""
         with self.read_conn() as conn:
             rows = conn.execute(
-                "SELECT rule, features, status FROM trade_signals"
+                "SELECT rule, features, candidates, status FROM trade_signals"
                 " WHERE status IN ('win','loss') AND features IS NOT NULL AND features != ''"
                 " ORDER BY exit_ts",
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def closed_trades_since(self, since_ts: float) -> list[tuple[float, float]]:
+        """(exit_ts, r_result) of resolved trades, oldest first (equity curve)."""
+        with self.read_conn() as conn:
+            rows = conn.execute(
+                "SELECT exit_ts, r_result FROM trade_signals"
+                " WHERE status IN ('win','loss') AND exit_ts >= ?"
+                " AND r_result IS NOT NULL ORDER BY exit_ts",
+                (since_ts,),
+            ).fetchall()
+        return [(float(r["exit_ts"]), float(r["r_result"])) for r in rows]
+
+    def research_get(self, key: str) -> str | None:
+        with self.read_conn() as conn:
+            row = conn.execute(
+                "SELECT value FROM research_state WHERE key=?", (key,)).fetchone()
+        return row["value"] if row else None
+
+    def research_set(self, key: str, value: str) -> None:
+        self._submit(
+            "INSERT INTO research_state (key, value) VALUES (?,?)"
+            " ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )
 
     def next_trade_signal_id(self) -> int:
         with self.read_conn() as conn:

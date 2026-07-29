@@ -116,6 +116,18 @@ def run_selftest() -> list[str]:
     m.update([1.0] * K, True)
     check("model.first_update", _approx(m.b, 0.25) and all(v == 0.0 for v in m.w))
     check("model.predict_range", 0.0 < m.predict([0.5] * K) < 1.0)
+    # Extended model must accept base-width vectors (open trades survive promotions)
+    mx = OnlineLogistic(lr=0.5, l2=0.0, names=[*["f"] * 0, *map(str, range(K + 2))])
+    check("model.width_pad", 0.0 < mx.predict([0.5] * K) < 1.0 and mx.k == K + 2)
+
+    # Research desk: point-biserial vs hand computation.
+    # x = [1,2,3,4], wins = [F,F,T,T]: m1=3.5, m0=1.5, std=sqrt(1.25), p=q=0.5
+    # r = (3.5-1.5)/sqrt(1.25)*0.5 = 1/sqrt(1.25)
+    from tapescreen.core.research import point_biserial
+    check("research.point_biserial",
+          _approx(point_biserial([1, 2, 3, 4], [False, False, True, True]),
+                  1.0 / math.sqrt(1.25)))
+    check("research.point_biserial_flat", point_biserial([2, 2, 2], [True, False, True]) == 0.0)
 
     # Tick side semantics survive normalize
     tmsg = {"channel": "trades", "data": [

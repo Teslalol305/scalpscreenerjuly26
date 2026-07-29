@@ -105,6 +105,24 @@ class LearningConfig:
 
 
 @dataclass(slots=True)
+class ResearchConfig:
+    enabled: bool
+    interval_s: float
+    min_rule_n: int            # analyst reports a rule once it has this many outcomes
+    probation_min_n: int       # risk officer acts only with this much evidence
+    probation_enter: float     # posterior below this -> probation
+    probation_exit: float      # posterior at/above this -> cleared
+    probation_conf_min: float  # confidence bar a gated rule's fires must clear
+    exploration_every: int     # 1 in N suppressed fires still opens (anti-starvation)
+    promote_r: float           # |point-biserial| to promote a candidate variable
+    promote_min_n: int         # resolved trades needed before scouting acts
+    demote_r: float            # |r| below this (with 2x evidence) retires a variable
+    max_extras: int            # cap on promoted variables (bounded model growth)
+    stagnant_meetings: int     # meetings without change before the loop-breaker acts
+    retire_cooldown_h: float   # hours before a retired variable can re-qualify
+
+
+@dataclass(slots=True)
 class AuditConfig:
     selftest_on_boot: bool
     interval_s: float
@@ -129,6 +147,7 @@ class Config:
     composite: CompositeConfig
     stats: StatsConfig
     learning: LearningConfig
+    research: ResearchConfig
     audit: AuditConfig
     db_path: str
     log_path: str
@@ -314,6 +333,22 @@ def load_config(path: str | Path = "config.yaml") -> Config:
             model_l2=_num(doc, "learning.model_l2", 0),
             model_min_n=_int(doc, "learning.model_min_n", 1),
             refit_epochs=_int(doc, "learning.refit_epochs", 0),
+        ),
+        research=ResearchConfig(
+            enabled=_bool(doc, "research.enabled"),
+            interval_s=_num(doc, "research.interval_s", 10),
+            min_rule_n=_int(doc, "research.min_rule_n", 1),
+            probation_min_n=_int(doc, "research.probation_min_n", 5),
+            probation_enter=_num(doc, "research.probation_enter", 0.05),
+            probation_exit=_num(doc, "research.probation_exit", 0.05),
+            probation_conf_min=_num(doc, "research.probation_conf_min", 0.05),
+            exploration_every=_int(doc, "research.exploration_every", 2),
+            promote_r=_num(doc, "research.promote_r", 0.01),
+            promote_min_n=_int(doc, "research.promote_min_n", 10),
+            demote_r=_num(doc, "research.demote_r", 0.0),
+            max_extras=_int(doc, "research.max_extras", 0),
+            stagnant_meetings=_int(doc, "research.stagnant_meetings", 1),
+            retire_cooldown_h=_num(doc, "research.retire_cooldown_h", 0),
         ),
         audit=AuditConfig(
             selftest_on_boot=_bool(doc, "audit.selftest_on_boot"),

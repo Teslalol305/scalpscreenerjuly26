@@ -22,12 +22,15 @@ from __future__ import annotations
 import json
 import logging
 import time as _time
+from collections import deque
 from dataclasses import dataclass, field
 
 from tapescreen.config import Config
 from tapescreen.core.events import Tick
 from tapescreen.core.features import FeatureSnapshot
+from tapescreen.core.research import compute_candidates
 from tapescreen.core.signals.base import LONG, SHORT, SignalEvent
+from tapescreen.core.signals.models import FEATURES as BASE_FEATURES
 from tapescreen.core.signals.models import OnlineLogistic
 from tapescreen.core.thoughts import CAT_LEARN, CAT_SYSTEM, CAT_TRADE, ThoughtLog, px
 from tapescreen.store.db import Db
@@ -83,6 +86,8 @@ class TradeSignal:
     tp1_fraction: float = 1.0 / 3.0
     realized: float = 0.0  # R banked by the TP1 partial
     features: list[float] = field(default_factory=list)
+    candidates: dict = field(default_factory=dict)  # research variables at entry
+    exploration: bool = False  # opened through the probation exploration quota
     status: str = "open"  # open | win | loss
     exit_ts: float = 0.0
     exit_price: float = 0.0
@@ -122,6 +127,7 @@ class TradeSignal:
             "avg_entry": self.avg_entry, "filled": self.filled,
             "stop": self.stop, "state": self.state, "risk_unit": self.risk_unit,
             "tp1_done": self.tp1_done, "realized": round(self.realized, 2),
+            "exploration": self.exploration,
             "status": self.status, "exit_ts": self.exit_ts,
             "exit_price": self.exit_price, "exit_reason": self.exit_reason,
             "r_result": round(self.total_r, 2), "live_r": round(self.live_r(), 2),
@@ -168,6 +174,9 @@ class SignalLedger:
         self.rule_buckets: dict[str, Bucket] = {}
         self.pair_buckets: dict[tuple[str, str], Bucket] = {}
         self.models: dict[str, OnlineLogistic] = {}
+        self.research = None  # ResearchDesk attaches itself after construction
+        self.extra_names: list[str] = []  # desk-promoted variables in the model vector
+        self._streaks: dict[str, deque] = {}  # rule -> recent win/loss (+1/-1)
         self._next_id = 1
         if db is not None:
             self._next_id = db.next_trade_signal_id()
@@ -205,22 +214,28 @@ class SignalLedger:
                          f"learning memory loaded: {int(total)} resolved outcomes "
                          f"across {len(self.rule_buckets)} strategies", lines)
 
-    def _refit(self, db: Db) -> None:
+    def _refit(self, db: Db, quiet: bool = False) -> None:
         """Rebuild the per-rule models from the full stored trade history.
 
         Models are refit from scratch each boot (persisted state is for
-        inspection only), so history is never double-counted."""
+        inspection only), so history is never double-counted. Vectors are
+        reconstructed as base features (a stable 12-value prefix) plus the
+        currently promoted extras looked up by name from stored candidates,
+        so a schema change never corrupts old samples."""
         try:
             rows = db.resolved_feature_history()
         except Exception:
             log.exception("model refit failed; starting fresh")
             return
+        base_k = len(BASE_FEATURES)
         samples: dict[str, list[tuple[list[float], bool]]] = {}
         for r in rows:
             try:
-                x = [float(v) for v in json.loads(r["features"])]
+                x = [float(v) for v in json.loads(r["features"])][:base_k]
+                cand = json.loads(r["candidates"]) if r.get("candidates") else {}
             except (ValueError, TypeError):
                 continue
+            x += [float(cand.get(n, 0.0)) for n in self.extra_names]
             samples.setdefault(r["rule"], []).append((x, r["status"] == "win"))
         for rule, data in samples.items():
             m = self._model(rule)
@@ -231,19 +246,32 @@ class SignalLedger:
         if samples:
             log.info("models refit: %s",
                      {r: len(d) for r, d in samples.items()})
-            if self.th is not None:
+            if self.th is not None and not quiet:
                 self.th.emit(_time.time(), CAT_SYSTEM, "",
                              "ML models rebuilt from the full stored trade history",
                              [f"{r}: trained on {len(d)} resolved trades"
                               for r, d in sorted(samples.items())]
                              + ["refit from scratch each boot so no outcome is ever double-counted"])
 
+    def rebuild_models(self, extras: list[str]) -> None:
+        """Adopt a new promoted-variable list and refit everything on history.
+        Open trades keep their entry-time vectors; the models pad/truncate."""
+        self.extra_names = list(extras)
+        self.models.clear()
+        if self.db is not None and self.lc.model_enabled:
+            self._refit(self.db, quiet=True)
+
     def _model(self, rule: str) -> OnlineLogistic:
         m = self.models.get(rule)
         if m is None:
-            m = OnlineLogistic(self.lc.model_lr, self.lc.model_l2)
+            m = OnlineLogistic(self.lc.model_lr, self.lc.model_l2,
+                               names=BASE_FEATURES + self.extra_names)
             self.models[rule] = m
         return m
+
+    def _streak_val(self, rule: str) -> float:
+        d = self._streaks.get(rule)
+        return sum(d) / 6.0 if d else 0.0
 
     def _posterior(self, b: Bucket) -> float:
         return (b.wins + self.lc.prior_wins) / (b.n + self.lc.prior_wins + self.lc.prior_losses)
@@ -351,7 +379,20 @@ class SignalLedger:
                            "filled_ts": None})
 
         features = extract_features(ev, snap)
+        cand = compute_candidates(ev, snap, self._streak_val(ev.rule))
+        features = features + [cand[n] for n in self.extra_names]
         conf, conf_n, conf_src = self.confidence(ev.rule, ev.symbol, features)
+
+        explore = False
+        if self.research is not None:
+            allow, explore, why = self.research.gate(ev.rule, conf)
+            if not allow:
+                if self.th is not None:
+                    self.th.emit(ev.ts, CAT_TRADE, ev.symbol,
+                                 f"{ev.rule} fired {ev.side} but the desk holds it back",
+                                 [why])
+                return None
+
         ts = TradeSignal(
             id=self._next_id, signal_id=int(ev.snapshot.get("_db_id", 0)), ts=ev.ts,
             symbol=ev.symbol, side=ev.side, rule=ev.rule, tier=ev.tier,
@@ -359,7 +400,8 @@ class SignalLedger:
             levels=levels, avg_entry=entry, risk_unit=dist,
             stop=stop, stop_initial=stop, best_px=entry,
             tp1_fraction=self.lc.tp1_fraction,
-            features=features, last_price=entry,
+            features=features, candidates=cand, exploration=explore,
+            last_price=entry,
         )
         self._next_id += 1
         self.open.setdefault(ev.symbol, []).append(ts)
@@ -369,8 +411,7 @@ class SignalLedger:
                 f"E{i + 1} {px(lv['px'])}" + (" (filled at signal)" if i == 0
                                               else f" ({-step * i:g}R)")
                 for i, lv in enumerate(levels))
-            self.th.emit(ev.ts, CAT_TRADE, ev.symbol,
-                         f"opening {ev.side} · {ev.rule} · win prob {conf * 100:.0f}%", [
+            detail = [
                 f"stop {px(stop)}: {stop_basis}; 1R = {px(dist)} "
                 f"({dist / entry * 1e4:.0f}bp of price)",
                 f"scale-in ladder: {rungs} - "
@@ -380,12 +421,19 @@ class SignalLedger:
                 f"stop to break-even · trail {self.lc.trail_dist_r:g}R behind best from "
                 f"+{self.lc.trail_start_r:g}R · hard exit at "
                 f"{self.lc.max_hold_s / 3600:g}h",
-            ])
+            ]
+            if explore:
+                detail.append("EXPLORATION trade: opened through the probation "
+                              "quota so this strategy keeps earning evidence")
+            self.th.emit(ev.ts, CAT_TRADE, ev.symbol,
+                         f"opening {ev.side} · {ev.rule} · win prob {conf * 100:.0f}%"
+                         + (" · exploration" if explore else ""), detail)
         if self.db is not None:
             self.db.insert_trade_signal(
                 ts.id, ts.signal_id, ts.ts, ts.symbol, ts.side, ts.rule, ts.tier,
                 conf, entry, stop, 0.0,
                 entries_json=json.dumps(ts.levels), features_json=json.dumps(features),
+                candidates_json=json.dumps(cand),
             )
         return ts
 
@@ -511,6 +559,7 @@ class SignalLedger:
         haircut_r = self.haircut / (ts.risk_unit / ts.avg_entry) if ts.risk_unit > 0 else 0.0
         won = ts.total_r > haircut_r
         ts.status = "win" if won else "loss"
+        self._streaks.setdefault(ts.rule, deque(maxlen=6)).append(1.0 if won else -1.0)
 
         if self.th is not None:
             banked = f" + banked {ts.realized:.2f}R" if ts.tp1_done else ""

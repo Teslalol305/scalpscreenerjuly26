@@ -13,6 +13,7 @@ from typing import Any
 from tapescreen.config import Config
 from tapescreen.core.events import Bbo, BookTop, Event, FeedStatus, Mids, PerpCtx, Tick
 from tapescreen.core.features import FeatureEngine, FeatureSnapshot
+from tapescreen.core.research import ResearchDesk
 from tapescreen.core.signals.base import SignalEvent
 from tapescreen.core.signals.composite import Composite
 from tapescreen.core.signals.ledger import SignalLedger
@@ -66,11 +67,22 @@ class Engine:
             "every decision from here on is narrated below, as it happens",
         ])
         self.ledger = SignalLedger(cfg, db, thoughts=self.thoughts)
+        self.research: ResearchDesk | None = (
+            ResearchDesk(cfg, self.ledger, self.thoughts, db)
+            if cfg.research.enabled else None
+        )
         self.composites: dict[str, Composite] = {
             sym: Composite(cfg, sym, weight_mult=self.ledger.rule_multiplier,
                            thoughts=self.thoughts)
             for sym in cfg.symbols
         }
+        # session equity curve: [ts, r, cum_r] per resolved trade, last 24h
+        self.session_curve: list[list[float]] = []
+        if db is not None:
+            cum = 0.0
+            for ts, r in db.closed_trades_since(time.time() - 86400.0):
+                cum += r
+                self.session_curve.append([ts, r, round(cum, 3)])
         self.flags: dict[str, dict] = {sym: {} for sym in cfg.symbols}
         self.outcomes = OutcomeTracker(cfg, db)
         self.signal_feed: deque[dict] = deque(maxlen=500)  # newest last; UI reverses
@@ -101,8 +113,31 @@ class Engine:
         self._trade_listeners.append(cb)
 
     def _emit_trade(self, kind: str, payload: dict) -> None:
+        if kind == "exit":
+            r = float(payload.get("r_result", 0.0))
+            prev = self.session_curve[-1][2] if self.session_curve else 0.0
+            self.session_curve.append([float(payload.get("exit_ts", time.time())),
+                                       r, round(prev + r, 3)])
+            cut = time.time() - 86400.0
+            while self.session_curve and self.session_curve[0][0] < cut:
+                self.session_curve.pop(0)
         for cb in self._trade_listeners:
             cb(kind, payload)
+
+    def hero(self) -> dict[str, Any]:
+        """24h headline numbers for the dashboard's performance card."""
+        rs = [p[1] for p in self.session_curve]
+        wins = sum(1 for r in rs if r > 0)
+        open_n = sum(len(v) for v in self.ledger.open.values())
+        return {
+            "net_r": round(sum(rs), 2),
+            "trades": len(rs),
+            "wins": wins,
+            "win_rate": round(wins / len(rs) * 100, 1) if rs else None,
+            "expectancy": round(sum(rs) / len(rs), 2) if rs else None,
+            "open": open_n,
+            "signals_total": self.signals_total,
+        }
 
     def _make_signal_hook(self, sym: str):
         comp = self.composites[sym]

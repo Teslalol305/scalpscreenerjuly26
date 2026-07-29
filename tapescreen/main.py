@@ -127,6 +127,14 @@ async def run(cfg: Config, args: argparse.Namespace) -> int:
 
     tasks.append(supervise(asyncio.create_task(_audit_loop(), name="auditor")))
 
+    if engine.research is not None:
+        async def _research_loop() -> None:
+            while True:
+                await asyncio.sleep(cfg.research.interval_s)
+                engine.research.meeting()
+
+        tasks.append(supervise(asyncio.create_task(_research_loop(), name="research")))
+
     ui: UiServer | None = None
     if not args.no_ui:
         ui = UiServer(cfg, engine, feed, db, auditor=auditor)

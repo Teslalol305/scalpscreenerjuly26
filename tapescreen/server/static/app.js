@@ -1,6 +1,7 @@
-/* TapeScreen frontend v5: conviction-scaled signal cards (ring + trade gauge +
-   entry ladder), labeled market grid, learning meters, help overlay.
-   Vanilla JS, no build step. Gauge/ring positions are R-space, animated via CSS. */
+/* TapeScreen frontend v7: card workspace (drag/resize/hide, layout persisted),
+   session performance hero + equity curve, quant-desk & tracked-variables cards,
+   conviction-scaled signal cards, labeled market grid, live reasoning feed.
+   Vanilla JS, no build step. */
 "use strict";
 
 const $ = (id) => document.getElementById(id);
@@ -16,6 +17,7 @@ const state = {
   thinkFilter: "all",
   thinkPaused: false,
   thinkPending: 0,
+  lastCurve: [],
   tally: { win: 0, loss: 0 },
   soundOn: false,
   alertScore: 80,
@@ -51,6 +53,310 @@ function fmtHold(s) {
 function shortRule(r) {
   return r.replace("_ignition", "").replace("book_imbalance", "book imb")
     .replace("_", " ");
+}
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+/* ---------------- card workspace: drag / resize / hide, persisted ---------------- */
+
+const LAYOUT_KEY = "ts-layout-v7";
+const GRID_GAP = 12, GRID_COLS = 12, GRID_ROW = 50;
+let draggingCard = null;
+
+function cardEls() { return [...document.querySelectorAll("#cards .dcard")]; }
+function spanOf(v, fb) { const m = /span (\d+)/.exec(v || ""); return m ? +m[1] : fb; }
+
+function saveLayout() {
+  const out = { order: [], cards: {} };
+  for (const el of cardEls()) {
+    const id = el.dataset.card;
+    out.order.push(id);
+    out.cards[id] = {
+      w: spanOf(el.style.gridColumn, +el.dataset.w),
+      h: spanOf(el.style.gridRow, +el.dataset.h),
+      hid: el.hidden,
+    };
+  }
+  localStorage.setItem(LAYOUT_KEY, JSON.stringify(out));
+}
+
+function applyCard(el, cfg) {
+  el.style.gridColumn = `span ${Math.max(3, Math.min(12, cfg.w))}`;
+  el.style.gridRow = `span ${Math.max(3, Math.min(24, cfg.h))}`;
+  el.hidden = !!cfg.hid;
+}
+
+function initLayout() {
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(LAYOUT_KEY)); } catch { /* fresh */ }
+  const grid = $("cards");
+  if (saved?.order) {
+    for (const id of saved.order) {
+      const el = grid.querySelector(`[data-card="${id}"]`);
+      if (el) grid.appendChild(el);
+    }
+  }
+  const toggles = $("card-toggles");
+  for (const el of cardEls()) {
+    const id = el.dataset.card;
+    const cfg = saved?.cards?.[id] || { w: +el.dataset.w, h: +el.dataset.h, hid: false };
+    applyCard(el, cfg);
+
+    // corner resize handle
+    const rh = document.createElement("div");
+    rh.className = "rs-handle";
+    rh.title = "drag to resize";
+    el.appendChild(rh);
+    rh.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      const cellW = (grid.clientWidth - GRID_GAP * (GRID_COLS - 1)) / GRID_COLS;
+      const w0 = spanOf(el.style.gridColumn, +el.dataset.w);
+      const h0 = spanOf(el.style.gridRow, +el.dataset.h);
+      const x0 = e.clientX, y0 = e.clientY;
+      el.classList.add("resizing");
+      const move = (ev) => {
+        const w = w0 + Math.round((ev.clientX - x0) / (cellW + GRID_GAP));
+        const h = h0 + Math.round((ev.clientY - y0) / (GRID_ROW + GRID_GAP));
+        applyCard(el, { w, h, hid: false });
+      };
+      const up = () => {
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", up);
+        el.classList.remove("resizing");
+        saveLayout();
+        drawEquity(state.lastCurve);
+      };
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", up);
+    });
+
+    // drag-to-reorder via the ⠿ handle
+    const grab = el.querySelector(".grab");
+    grab.addEventListener("mousedown", () => el.setAttribute("draggable", "true"));
+    el.addEventListener("dragstart", (e) => {
+      draggingCard = el;
+      el.classList.add("dragging");
+      e.dataTransfer.effectAllowed = "move";
+      try { e.dataTransfer.setData("text/plain", id); } catch { /* IE */ }
+    });
+    el.addEventListener("dragend", () => {
+      el.classList.remove("dragging");
+      el.removeAttribute("draggable");
+      draggingCard = null;
+      saveLayout();
+      drawEquity(state.lastCurve);
+    });
+
+    // hide button + sidebar toggle
+    const title = el.querySelector(".ct h3").textContent;
+    const lab = document.createElement("label");
+    lab.className = "ctog";
+    lab.innerHTML = `<input type="checkbox" ${cfg.hid ? "" : "checked"}> ${esc(title)}`;
+    const cb = lab.querySelector("input");
+    cb.addEventListener("change", () => {
+      el.hidden = !cb.checked;
+      saveLayout();
+      drawEquity(state.lastCurve);
+    });
+    toggles.appendChild(lab);
+    el.querySelector(".hide-btn").addEventListener("click", () => {
+      el.hidden = true;
+      cb.checked = false;
+      saveLayout();
+    });
+  }
+  grid.addEventListener("dragover", (e) => {
+    if (!draggingCard) return;
+    e.preventDefault();
+    const t = e.target.closest(".dcard");
+    if (!t || t === draggingCard) return;
+    const r = t.getBoundingClientRect();
+    const before = e.clientY < r.top + r.height / 2;
+    grid.insertBefore(draggingCard, before ? t : t.nextSibling);
+  });
+  $("layout-reset").addEventListener("click", () => {
+    localStorage.removeItem(LAYOUT_KEY);
+    location.reload();
+  });
+}
+
+/* ---------------- hero + equity curve ---------------- */
+
+function renderHero(h) {
+  if (!h) return;
+  const net = $("h-netr");
+  net.textContent = (h.net_r > 0 ? "+" : "") + h.net_r + "R";
+  net.style.color = h.net_r > 0.005 ? "var(--up)" : h.net_r < -0.005 ? "var(--dn)" : "";
+  $("h-wr").textContent = h.win_rate == null ? "–" : h.win_rate + "%";
+  $("h-exp").textContent = h.expectancy == null ? "–" : fmtSigned(h.expectancy) + "R";
+  $("h-trades").textContent = h.trades;
+  $("h-open").textContent = h.open;
+}
+
+function drawEquity(curve) {
+  state.lastCurve = curve || [];
+  const wrap = $("equity-wrap"), cv = $("equity");
+  const W = wrap.clientWidth, H = wrap.clientHeight;
+  $("equity-empty").style.display = curve?.length ? "none" : "flex";
+  if (!W || !H) return;
+  const dpr = window.devicePixelRatio || 1;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  const ctx = cv.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  if (!curve?.length) return;
+
+  let cum = 0;
+  const pts = curve.map((p) => [p[0], (cum += p[1])]);
+  pts.unshift([pts[0][0] - 1, 0]);  // rebase: window starts flat at 0
+  const padL = 6, padR = 46, padY = 10;
+  const t0 = pts[0][0], t1 = pts[pts.length - 1][0] || t0 + 1;
+  const ys = pts.map((p) => p[1]);
+  const yMin = Math.min(0, ...ys), yMax = Math.max(0, ...ys);
+  const ySpan = (yMax - yMin) || 1;
+  const X = (t) => padL + ((t - t0) / Math.max(1e-9, t1 - t0)) * (W - padL - padR);
+  const Y = (v) => padY + (1 - (v - yMin) / ySpan) * (H - 2 * padY);
+
+  // zero line
+  ctx.setLineDash([3, 4]);
+  ctx.strokeStyle = "rgba(156,156,184,.35)";
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(padL, Y(0)); ctx.lineTo(W - padR, Y(0)); ctx.stroke();
+  ctx.setLineDash([]);
+
+  // area fill to zero
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, "rgba(167,139,250,.28)");
+  grad.addColorStop(1, "rgba(167,139,250,.02)");
+  ctx.beginPath();
+  ctx.moveTo(X(pts[0][0]), Y(0));
+  for (const [t, v] of pts) ctx.lineTo(X(t), Y(v));
+  ctx.lineTo(X(t1), Y(0));
+  ctx.closePath();
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  // the line (step-after reads truthfully for discrete trade outcomes)
+  ctx.beginPath();
+  pts.forEach(([t, v], i) => {
+    const x = X(t), y = Y(v);
+    if (i === 0) ctx.moveTo(x, y);
+    else { ctx.lineTo(x, Y(pts[i - 1][1])); ctx.lineTo(x, y); }
+  });
+  ctx.strokeStyle = "#a78bfa";
+  ctx.lineWidth = 2;
+  ctx.lineJoin = "round";
+  ctx.shadowColor = "rgba(139,92,246,.55)";
+  ctx.shadowBlur = 8;
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+
+  // end dot + value
+  const last = pts[pts.length - 1];
+  ctx.beginPath();
+  ctx.arc(X(last[0]), Y(last[1]), 3.5, 0, Math.PI * 2);
+  ctx.fillStyle = "#c4b5fd";
+  ctx.fill();
+  ctx.font = "700 11px ui-monospace, Menlo, monospace";
+  ctx.fillStyle = last[1] >= 0 ? "#26a69a" : "#ef5350";
+  ctx.fillText((last[1] > 0 ? "+" : "") + last[1].toFixed(2) + "R",
+    W - padR + 6, Y(last[1]) + 4);
+}
+new ResizeObserver(() => drawEquity(state.lastCurve)).observe($("equity-wrap"));
+
+/* ---------------- quant desk + tracked variables ---------------- */
+
+function renderDesk(d) {
+  const box = $("desk-body");
+  if (!d) {
+    box.innerHTML = "<p class='empty-note'>research desk disabled in config</p>";
+    return;
+  }
+  const probs = Object.entries(d.probation || {});
+  let h = `<div class="desk-meta"><b>${d.meetings}</b><u>meetings held</u>` +
+    (d.last_ts ? `<u>· last ${fmtClock(d.last_ts)}</u>` : "") + `</div>`;
+  h += `<div class="desk-sec"><h5>findings</h5>` +
+    ((d.findings?.length)
+      ? d.findings.map((f) => `<div class="desk-finding">${esc(f)}</div>`).join("")
+      : `<p class="desk-ok">the desk convenes after new outcomes resolve — findings appear here</p>`)
+    + `</div>`;
+  h += `<div class="desk-sec"><h5>probation</h5>`;
+  if (probs.length) {
+    h += probs.map(([rule, p]) =>
+      `<div class="prob-chip"><b>${esc(shortRule(rule))}</b>
+       <span>needs ≥${Math.round(p.conf_min * 100)}% · held ${p.suppressed} ·
+       explored ${p.explored} (1 in ${p.every} opens)</span></div>`).join("");
+  } else {
+    h += `<p class="desk-ok">none — every strategy is trading on its own record</p>`;
+  }
+  h += `</div>`;
+  if (d.next_focus) {
+    h += `<div class="desk-sec"><h5>next focus</h5><p class="desk-focus">${esc(d.next_focus)}</p></div>`;
+  }
+  box.innerHTML = h;
+}
+
+function varRow(name, r, sub, discovered) {
+  const width = Math.min(100, Math.abs(r || 0) * 250).toFixed(0);
+  return `<div class="var-row">
+    <div class="vr-top"><span class="vr-name ${discovered ? "discovered" : ""}">${esc(name)}</span>
+      <span class="vr-r">${r == null ? "" : "r " + fmtSigned(r, 3)}</span></div>
+    <div class="vr-bar"><i style="width:${width}%"></i></div>
+    <div class="vr-sub">${esc(sub)}</div></div>`;
+}
+
+function renderVars(d) {
+  const box = $("vars-body");
+  if (!d) {
+    box.innerHTML = "<p class='empty-note'>research desk disabled in config</p>";
+    return;
+  }
+  const nx = (d.active_extras || []).length;
+  let h = `<div class="vars-head">model inputs: <b>${d.base_features} base + ${nx} discovered</b></div>`;
+  for (const v of d.active_extras || []) {
+    h += varRow(v.name, v.live_r ?? v.r,
+      `promoted at r ${fmtSigned(v.r ?? 0, 3)} over ${v.n ?? "?"} trades — now in every model`,
+      true);
+  }
+  const under = Object.entries(d.candidates || {})
+    .filter(([n]) => !(d.active_extras || []).some((v) => v.name === n))
+    .sort((a, b) => Math.abs(b[1].r) - Math.abs(a[1].r)).slice(0, 4);
+  if (under.length) {
+    h += `<div class="vars-head" style="margin-top:10px">under study</div>`;
+    for (const [n, s] of under) {
+      h += varRow(n, s.r, `${s.n} trades measured — promotion needs |r| ≥ 0.15`, false);
+    }
+  } else if (!nx) {
+    h += `<p class="vars-note">the scout measures ${11} candidate variables (time of day,
+      funding percentile, squeeze regime, OI thrust, book persistence…) on every trade.
+      Once 40 resolve, anything with real predictive correlation is promoted into the
+      models — the system discovers its own new data points.</p>`;
+  }
+  box.innerHTML = h;
+}
+
+function renderHealth(st) {
+  const a = st.audit;
+  const fh = st.feed_health || {};
+  const tiles = [
+    a ? [a.ok ? "✓ clean" : a.failures.length + " issue(s)",
+         `self-audit · run #${a.runs}`, a.ok ? "ok" : "bad"]
+      : ["–", "self-audit · not run yet", ""],
+    [(a?.quarantined?.length ? a.quarantined.join(" ") : "none"),
+     "quarantined markets", a?.quarantined?.length ? "bad" : "ok"],
+    [st.msg_rate ?? 0, "messages / s", ""],
+    [(fh.dropped_msgs || 0) + (fh.queue_drops || 0), "dropped events",
+     ((fh.dropped_msgs || 0) + (fh.queue_drops || 0)) ? "bad" : "ok"],
+    [st.db_write_errors ?? 0, "db write errors", st.db_write_errors ? "bad" : "ok"],
+    [st.pipeline_latency_p95_ms ? st.pipeline_latency_p95_ms + "ms" : "–",
+     "tick→screen p95", ""],
+    [st.outcomes_completed ?? 0, "outcomes measured", ""],
+  ];
+  $("health-body").innerHTML = tiles.map(([v, k, cls]) =>
+    `<div class="hl-tile ${cls}"><div class="v">${esc(String(v))}</div><div class="k">${esc(k)}</div></div>`).join("");
 }
 
 /* ---------------- market grid ---------------- */
@@ -210,6 +516,7 @@ function buildCard(t, fresh) {
       <span class="sym">${t.symbol}</span>
       <span class="tierchip ${t.tier}">${t.tier}</span>
       <span class="rule">${shortRule(t.rule)}</span>
+      ${t.exploration ? `<span class="expchip" title="opened through the probation exploration quota — the strategy is gated but must keep earning evidence">explore</span>` : ""}
       <span class="conf">
         <span class="conf-label"><b>WIN PROBABILITY</b><span>${src} · n=${t.conf_n}</span></span>
         <span class="conf-wrap" style="width:${size}px;height:${size}px">
@@ -298,6 +605,12 @@ function updateCard(entry, t) {
   refs.ageTxt.textContent = `${fmtHold(age)} / ${fmtHold(state.maxHold)}`;
 }
 
+function boardCount() {
+  $("board-count").textContent = state.cards.size
+    ? `${state.cards.size} open`
+    : "bigger & greener = higher measured win probability";
+}
+
 function renderBoard(active) {
   const seen = new Set();
   for (const t of active) {
@@ -314,7 +627,7 @@ function renderBoard(active) {
     if (!seen.has(id)) { entry.el.remove(); state.cards.delete(id); }
   }
   $("board-empty").style.display = state.cards.size ? "none" : "block";
-  $("board-count").textContent = state.cards.size ? `${state.cards.size} open` : "";
+  boardCount();
 }
 
 function onEntry(t) {
@@ -324,7 +637,7 @@ function onEntry(t) {
     boardCards.prepend(entry.el);
     updateCard(entry, t);
     $("board-empty").style.display = "none";
-    $("board-count").textContent = `${state.cards.size} open`;
+    boardCount();
   }
   if (state.soundOn) blip(660, 0.09);
   if (t.tier === "ALERT") alertUser(t);
@@ -355,7 +668,7 @@ function onExit(t) {
   $("ticker-tally").textContent = `W ${win} · L ${loss}`;
   if (state.soundOn) blip(t.status === "win" ? 880 : 330, 0.12);
   $("board-empty").style.display = state.cards.size ? "none" : "block";
-  $("board-count").textContent = state.cards.size ? `${state.cards.size} open` : "";
+  boardCount();
 }
 
 function renderLearning(learning) {
@@ -381,11 +694,6 @@ function renderLearning(learning) {
 
 const thinkFeed = $("think-feed");
 const THINK_DOM_CAP = 120;
-
-function esc(s) {
-  return String(s).replace(/[&<>"]/g, (c) =>
-    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-}
 
 function thoughtLi(th, fresh) {
   const li = document.createElement("li");
@@ -450,22 +758,13 @@ document.querySelectorAll(".tf-chip").forEach((b) => b.addEventListener("click",
   renderThinkFeed();
 }));
 
-function setThinkCollapsed(collapsed, save) {
-  $("think-pane").classList.toggle("collapsed", collapsed);
-  $("think-collapse").textContent = collapsed ? "▴" : "▾";
-  if (save) localStorage.setItem("ts-think", collapsed ? "1" : "0");
-}
-$("think-collapse").addEventListener("click", () =>
-  setThinkCollapsed(!$("think-pane").classList.contains("collapsed"), true));
-setThinkCollapsed(localStorage.getItem("ts-think") === "1", false);
-
-/* ---------------- status bar ---------------- */
+/* ---------------- sidebar status ---------------- */
 
 function updateStatus(st) {
   const fh = st.feed_health || {};
   const connected = fh.connected !== undefined ? fh.connected : true;
   $("st-conn").querySelector(".dot").className = "dot " + (connected ? "ok" : "bad");
-  $("st-conn").querySelector("b").textContent = fh.venue || "replay";
+  $("st-venue").textContent = fh.venue || "replay";
   $("st-rate").textContent = st.msg_rate ?? 0;
   $("st-ingest").textContent = `${st.ingest_latency_p50_ms}/${st.ingest_latency_p95_ms}ms`;
   $("st-pipe").textContent = st.pipeline_latency_p95_ms
@@ -547,10 +846,10 @@ document.addEventListener("keydown", (e) => {
 
 const CHART_OPTS = {
   autoSize: true,
-  layout: { background: { color: "#11151d" }, textColor: "#9aa4b8", fontSize: 11 },
-  grid: { vertLines: { color: "#171c26" }, horzLines: { color: "#171c26" } },
-  timeScale: { timeVisible: true, secondsVisible: true, borderColor: "#222938" },
-  rightPriceScale: { borderColor: "#222938" },
+  layout: { background: { color: "#12121b" }, textColor: "#9c9cb8", fontSize: 11 },
+  grid: { vertLines: { color: "#181826" }, horzLines: { color: "#181826" } },
+  timeScale: { timeVisible: true, secondsVisible: true, borderColor: "#232336" },
+  rightPriceScale: { borderColor: "#232336" },
   crosshair: { mode: 0 },
 };
 
@@ -632,7 +931,7 @@ function onCandles(msg) {
     const S = window.LightweightCharts.LineStyle;
     const mk = (price, title, style) =>
       c.priceLines.push(c.candles.createPriceLine({
-        price, title, color: "#4f8ff7", lineStyle: style, lineWidth: 1, axisLabelVisible: false,
+        price, title, color: "#a78bfa", lineStyle: style, lineWidth: 1, axisLabelVisible: false,
       }));
     mk(v.session, "vwap", S.Solid);
     for (const k of [1, 2]) {
@@ -651,7 +950,7 @@ function onCandles(msg) {
   }
 }
 
-/* ---------------- stats tab ---------------- */
+/* ---------------- stats view ---------------- */
 
 function tbl(rows, cols) {
   if (!rows?.length) return "<p class='note'>no data yet</p>";
@@ -687,13 +986,14 @@ async function loadStats() {
   $("stats-symbol").innerHTML = tbl(d.by_symbol, cols);
 }
 
-document.querySelectorAll(".tab").forEach((b) => b.addEventListener("click", () => {
-  document.querySelectorAll(".tab").forEach((x) => x.classList.remove("active"));
+document.querySelectorAll(".nav-item").forEach((b) => b.addEventListener("click", () => {
+  document.querySelectorAll(".nav-item").forEach((x) => x.classList.remove("active"));
   b.classList.add("active");
-  const stats = b.dataset.tab === "stats";
-  $("view-screen").hidden = stats;
+  const stats = b.dataset.view === "stats";
+  $("view-dash").hidden = stats;
   $("view-stats").hidden = !stats;
   if (stats) loadStats();
+  else drawEquity(state.lastCurve);
 }));
 
 /* ---------------- websocket ---------------- */
@@ -711,10 +1011,15 @@ function connect() {
       for (const [sym, r] of Object.entries(msg.rows)) updateRow(sym, r, msg.ts);
       resortGrid();
       updateStatus(msg.status);
+      renderHealth(msg.status);
       if (msg.board) {
         renderBoard(msg.board.active);
         renderLearning(msg.board.learning);
       }
+      renderHero(msg.hero);
+      drawEquity(msg.curve || []);
+      renderDesk(msg.desk);
+      renderVars(msg.desk);
     } else if (msg.type === "entry") {
       onEntry(msg.trade);
     } else if (msg.type === "exit") {
@@ -757,8 +1062,13 @@ function onHello(msg) {
     for (const t of msg.board.resolved || []) ticker.appendChild(tickerLi(t, false));
     renderLearning(msg.board.learning);
   }
+  renderHero(msg.hero);
+  drawEquity(msg.curve || []);
+  renderDesk(msg.desk);
+  renderVars(msg.desk);
   const saved = localStorage.getItem("ts-sound");
   setSound(saved === null ? msg.sound_default : saved === "1", false);
 }
 
+initLayout();
 connect();

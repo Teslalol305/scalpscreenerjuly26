@@ -128,6 +128,28 @@ learning:
                                 #   Beta bucket; above, the model's probability
   refit_epochs: 3               # boot-time refit passes over stored history
 
+# The research desk: a bounded, deterministic "quant panel" that studies every
+# resolved outcome. It promotes candidate variables into the models when they
+# prove predictive (and retires them when the evidence decays), puts weak
+# strategies on probation behind a higher confidence bar, and guarantees
+# exploration so a gated strategy can never be starved of the data it needs
+# to clear itself. Every action is narrated to the reasoning trace.
+research:
+  enabled: true
+  interval_s: 120               # desk meeting cadence (only acts on new outcomes)
+  min_rule_n: 12                # analyst reports a rule once n >= this
+  probation_min_n: 25           # risk officer needs this much evidence to gate
+  probation_enter: 0.45         # posterior win rate below this -> probation
+  probation_exit: 0.50          # posterior at/above this -> probation lifted
+  probation_conf_min: 0.55      # gated fires need this win probability to open
+  exploration_every: 4          # 1 in N suppressed fires opens anyway
+  promote_r: 0.15               # |win correlation| to promote a candidate variable
+  promote_min_n: 40             # resolved trades (with candidates) before scouting
+  demote_r: 0.05                # decayed |r| that retires a promoted variable
+  max_extras: 6                 # cap on promoted variables (bounded model growth)
+  stagnant_meetings: 6          # no-change meetings before the loop-breaker acts
+  retire_cooldown_h: 24         # retired variables sit out this long
+
 # Continuous self-verification: boot logic selftest + runtime data/logic audits.
 audit:
   selftest_on_boot: true        # re-verify core math vs known constants at startup

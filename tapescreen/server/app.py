@@ -140,6 +140,9 @@ class UiServer:
                 "resolved": self.engine.ledger.resolved_recent[-20:][::-1],
                 "learning": self.engine.ledger.learning_snapshot(),
             },
+            "desk": self.engine.research.snapshot() if self.engine.research else None,
+            "curve": self.engine.session_curve[-500:],
+            "hero": self.engine.hero(),
         }
 
     def _row(self, sym: str, now: float) -> dict[str, Any]:
@@ -196,7 +199,10 @@ class UiServer:
             "resolved": led.resolved_recent[-20:][::-1],
             "learning": led.learning_snapshot(),
         }
-        return {"type": "grid", "ts": now, "rows": rows, "status": st, "board": board}
+        return {"type": "grid", "ts": now, "rows": rows, "status": st, "board": board,
+                "desk": self.engine.research.snapshot() if self.engine.research else None,
+                "curve": self.engine.session_curve[-500:],
+                "hero": self.engine.hero()}
 
     def _candles(self, sym: str) -> dict[str, Any]:
         if sym not in self.engine.states:

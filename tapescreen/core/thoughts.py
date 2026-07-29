@@ -22,6 +22,7 @@ log = logging.getLogger("tapescreen.thoughts")
 CAT_SIGNAL = "signal"    # rule logic: fires, cooldown suppressions, tier grading
 CAT_TRADE = "trade"      # trade management: ladders, BE/trail moves, exits
 CAT_LEARN = "learning"   # record/weight/model updates from resolved trades
+CAT_DESK = "research"    # quant-desk meetings: promotions, probation, exploration
 CAT_AUDIT = "audit"      # self-verification results, quarantine decisions
 CAT_SYSTEM = "system"    # boot: memory load, model refits, self-test
 
