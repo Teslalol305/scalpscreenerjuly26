@@ -75,6 +75,15 @@ CREATE TABLE IF NOT EXISTS model_state (
     n       INTEGER NOT NULL,
     updated REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS thoughts (
+    id       INTEGER PRIMARY KEY,
+    ts       REAL NOT NULL,
+    category TEXT NOT NULL,
+    symbol   TEXT,
+    headline TEXT NOT NULL,
+    detail   TEXT NOT NULL   -- JSON list of detail lines
+);
+CREATE INDEX IF NOT EXISTS idx_thoughts_ts ON thoughts(ts);
 """
 
 # columns added after the v0.2 schema; applied idempotently at open (SQLite
@@ -176,6 +185,41 @@ class Db:
             " r_result=?, realized_r=?, state=? WHERE id=?",
             (status, exit_ts, exit_price, exit_reason, r_result, realized_r, state, tid),
         )
+
+    def insert_thought(self, tid: int, ts: float, category: str, symbol: str,
+                       headline: str, detail_json: str) -> None:
+        self._submit(
+            "INSERT INTO thoughts (id, ts, category, symbol, headline, detail)"
+            " VALUES (?,?,?,?,?,?)",
+            (tid, ts, category, symbol, headline, detail_json),
+        )
+
+    def prune_thoughts(self, below_id: int) -> None:
+        if below_id > 0:
+            self._submit("DELETE FROM thoughts WHERE id <= ?", (below_id,))
+
+    def next_thought_id(self) -> int:
+        with self.read_conn() as conn:
+            row = conn.execute("SELECT COALESCE(MAX(id), 0) FROM thoughts").fetchone()
+        return int(row[0]) + 1
+
+    def recent_thoughts(self, limit: int = 150) -> list[dict[str, Any]]:
+        """Newest `limit` thoughts, oldest first (ready for the UI backfill)."""
+        with self.read_conn() as conn:
+            rows = conn.execute(
+                "SELECT id, ts, category, symbol, headline, detail FROM thoughts"
+                " ORDER BY id DESC LIMIT ?", (limit,),
+            ).fetchall()
+        out = []
+        for r in reversed(rows):
+            try:
+                detail = json.loads(r["detail"])
+            except (ValueError, TypeError):
+                detail = []
+            out.append({"id": r["id"], "ts": r["ts"], "cat": r["category"],
+                        "symbol": r["symbol"] or "", "headline": r["headline"],
+                        "detail": detail})
+        return out
 
     def save_model(self, rule: str, state_json: str, n: int, updated: float) -> None:
         self._submit(

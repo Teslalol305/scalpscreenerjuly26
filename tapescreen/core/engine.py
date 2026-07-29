@@ -17,6 +17,7 @@ from tapescreen.core.signals.base import SignalEvent
 from tapescreen.core.signals.composite import Composite
 from tapescreen.core.signals.ledger import SignalLedger
 from tapescreen.core.state import SymbolState
+from tapescreen.core.thoughts import CAT_SYSTEM, CAT_TRADE, ThoughtLog
 from tapescreen.store.db import Db
 from tapescreen.store.outcomes import OutcomeTracker
 
@@ -55,9 +56,19 @@ class Engine:
         self.features: dict[str, FeatureEngine] = {
             sym: FeatureEngine(st) for sym, st in self.states.items()
         }
-        self.ledger = SignalLedger(cfg, db)
+        self.thoughts = ThoughtLog(db)
+        from tapescreen import __version__
+        self.thoughts.emit(time.time(), CAT_SYSTEM, "",
+                           f"TapeScreen v{__version__} starting: {len(cfg.symbols)} symbols", [
+            "boot self-test verified core math against hand-computed values "
+            "before this point (the app refuses to start otherwise)"
+            if cfg.audit.selftest_on_boot else "boot self-test disabled in config",
+            "every decision from here on is narrated below, as it happens",
+        ])
+        self.ledger = SignalLedger(cfg, db, thoughts=self.thoughts)
         self.composites: dict[str, Composite] = {
-            sym: Composite(cfg, sym, weight_mult=self.ledger.rule_multiplier)
+            sym: Composite(cfg, sym, weight_mult=self.ledger.rule_multiplier,
+                           thoughts=self.thoughts)
             for sym in cfg.symbols
         }
         self.flags: dict[str, dict] = {sym: {} for sym in cfg.symbols}
@@ -119,7 +130,15 @@ class Engine:
             cb(row)
         # open a tracked trade signal (entry) for directional fires - unless the
         # symbol is quarantined by the auditor (never signal off suspect data)
-        if ev.symbol not in self.quarantined:
+        if ev.symbol in self.quarantined:
+            if ev.side:
+                self.thoughts.emit(ev.ts, CAT_TRADE, ev.symbol,
+                                   f"{ev.rule} fired {ev.side} but {ev.symbol} is "
+                                   "quarantined - no trade", [
+                    "this symbol is failing data self-audits; "
+                    "no trades open on data the system cannot trust",
+                ])
+        else:
             ev.snapshot["_db_id"] = sid
             trade = self.ledger.on_rule_fire(ev, self.features[ev.symbol].snapshot)
             if trade is not None:

@@ -61,6 +61,13 @@ class OnlineLogistic:
         z = self._z(x)
         return _sigmoid(sum(w * v for w, v in zip(self.w, z, strict=True)) + self.b)
 
+    def contributions(self, x: list[float]) -> list[tuple[str, float]]:
+        """(feature, weight*z) per input, strongest first - explains a prediction."""
+        z = self._z(x)
+        pairs = [(FEATURES[i], self.w[i] * z[i]) for i in range(K)]
+        pairs.sort(key=lambda p: -abs(p[1]))
+        return pairs
+
     def update(self, x: list[float], won: bool) -> float:
         """One SGD step; returns the pre-update prediction for the sample."""
         self.n += 1

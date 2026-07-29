@@ -12,6 +12,10 @@ const state = {
   symbols: [],
   rows: new Map(),
   cards: new Map(),       // trade id -> {el, refs}
+  thoughts: [],           // reasoning trace, newest last (cap 400)
+  thinkFilter: "all",
+  thinkPaused: false,
+  thinkPending: 0,
   tally: { win: 0, loss: 0 },
   soundOn: false,
   alertScore: 80,
@@ -373,6 +377,88 @@ function renderLearning(learning) {
   }).join("");
 }
 
+/* ---------------- reasoning feed ---------------- */
+
+const thinkFeed = $("think-feed");
+const THINK_DOM_CAP = 120;
+
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+function thoughtLi(th, fresh) {
+  const li = document.createElement("li");
+  li.className = `th cat-${th.cat}${fresh ? " fresh" : ""}`;
+  li.innerHTML = `
+    <div class="th-top">
+      <span class="th-time">${fmtClock(th.ts)}</span>
+      <span class="th-cat">${th.cat}</span>
+      ${th.symbol ? `<span class="th-sym">${esc(th.symbol)}</span>` : ""}
+      <span class="th-head">${esc(th.headline)}</span>
+    </div>
+    ${th.detail?.length
+      ? `<div class="th-detail">${th.detail.map((d) => `<div>${esc(d)}</div>`).join("")}</div>`
+      : ""}`;
+  if (th.symbol) li.addEventListener("click", () => openDrawer(th.symbol));
+  return li;
+}
+
+function thinkMatches(th) {
+  return state.thinkFilter === "all" || th.cat === state.thinkFilter ||
+    (state.thinkFilter === "audit" && th.cat === "system");
+}
+
+function renderThinkFeed() {
+  thinkFeed.textContent = "";
+  const shown = state.thoughts.filter(thinkMatches).slice(-THINK_DOM_CAP);
+  for (let i = shown.length - 1; i >= 0; i--) thinkFeed.appendChild(thoughtLi(shown[i], false));
+  if (!thinkFeed.children.length) {
+    const li = document.createElement("li");
+    li.id = "think-empty";
+    li.textContent = "no decisions in this category yet — they appear here the moment the system makes one.";
+    thinkFeed.appendChild(li);
+  }
+}
+
+function onThought(th) {
+  state.thoughts.push(th);
+  if (state.thoughts.length > 400) state.thoughts.shift();
+  if (state.thinkPaused) { state.thinkPending++; return; }
+  if (!thinkMatches(th)) return;
+  const empty = $("think-empty");
+  if (empty) empty.remove();
+  thinkFeed.prepend(thoughtLi(th, true));
+  while (thinkFeed.children.length > THINK_DOM_CAP) thinkFeed.lastChild.remove();
+}
+
+thinkFeed.addEventListener("mouseenter", () => {
+  state.thinkPaused = true;
+  $("think-paused").hidden = false;
+});
+thinkFeed.addEventListener("mouseleave", () => {
+  state.thinkPaused = false;
+  $("think-paused").hidden = true;
+  if (state.thinkPending) { state.thinkPending = 0; renderThinkFeed(); }
+});
+
+document.querySelectorAll(".tf-chip").forEach((b) => b.addEventListener("click", () => {
+  document.querySelectorAll(".tf-chip").forEach((x) => x.classList.remove("active"));
+  b.classList.add("active");
+  state.thinkFilter = b.dataset.cat;
+  state.thinkPending = 0;
+  renderThinkFeed();
+}));
+
+function setThinkCollapsed(collapsed, save) {
+  $("think-pane").classList.toggle("collapsed", collapsed);
+  $("think-collapse").textContent = collapsed ? "▴" : "▾";
+  if (save) localStorage.setItem("ts-think", collapsed ? "1" : "0");
+}
+$("think-collapse").addEventListener("click", () =>
+  setThinkCollapsed(!$("think-pane").classList.contains("collapsed"), true));
+setThinkCollapsed(localStorage.getItem("ts-think") === "1", false);
+
 /* ---------------- status bar ---------------- */
 
 function updateStatus(st) {
@@ -633,6 +719,8 @@ function connect() {
       onEntry(msg.trade);
     } else if (msg.type === "exit") {
       onExit(msg.trade);
+    } else if (msg.type === "thought") {
+      onThought(msg.thought);
     } else if (msg.type === "candles") {
       onCandles(msg);
     } else if (msg.type === "hello") {
@@ -661,6 +749,9 @@ function onHello(msg) {
   boardCards.querySelectorAll(".card").forEach((c) => c.remove());
   state.cards.clear();
   ticker.textContent = "";
+  state.thoughts = msg.thoughts || [];
+  state.thinkPending = 0;
+  renderThinkFeed();
   if (msg.board) {
     renderBoard(msg.board.active);
     for (const t of msg.board.resolved || []) ticker.appendChild(tickerLi(t, false));

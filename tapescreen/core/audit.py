@@ -18,6 +18,7 @@ from typing import Any
 from tapescreen.config import Config
 from tapescreen.core.engine import Engine
 from tapescreen.core.signals.ledger import ST_BE, ST_INIT, ST_TRAIL
+from tapescreen.core.thoughts import CAT_AUDIT
 from tapescreen.store.db import Db
 
 log = logging.getLogger("tapescreen.audit")
@@ -89,7 +90,7 @@ class Auditor:
         checks += self._check_db(now, failures)
         checks += self._check_feed(now, failures)
 
-        self._update_quarantine(sym_fail)
+        self._update_quarantine(sym_fail, failures, now)
         self.runs_total += 1
         self.failures_total += len(failures)
         report = AuditReport(
@@ -98,9 +99,20 @@ class Auditor:
             runs_total=self.runs_total, failures_total=self.failures_total,
         )
         self.last_report = report
+        th = self.engine.thoughts
         if failures:
             log.warning("self-audit found %d issue(s): %s",
                         len(failures), "; ".join(failures[:6]))
+            th.emit(now, CAT_AUDIT, "",
+                    f"self-audit #{self.runs_total}: {len(failures)} issue(s) found",
+                    failures[:6])
+        elif self.runs_total % 10 == 1:  # ~5-min heartbeat proving the checks run
+            th.emit(now, CAT_AUDIT, "",
+                    f"self-audit #{self.runs_total}: all {checks} checks passed", [
+                "prices cross-checked against the venue's independent mid feed",
+                "book/bar/feature invariants, open-trade state, learning sanity, "
+                "DB health all verified",
+            ])
         return report
 
     def _check_symbol_data(self, sym: str, now: float, out: list[str]) -> int:
@@ -233,14 +245,21 @@ class Auditor:
 
     # -------------------------------------------------------------- quarantine
 
-    def _update_quarantine(self, failing: set[str]) -> None:
+    def _update_quarantine(self, failing: set[str], failures: list[str],
+                           now: float) -> None:
         need = self.cfg.audit.quarantine_clear_checks
+        th = self.engine.thoughts
         for sym, h in self._sym.items():
             if sym in failing:
                 h.dirty = True
                 h.clean_streak = 0
                 if sym not in self.engine.quarantined:
                     log.warning("quarantining %s: failing data audits", sym)
+                    why = [f for f in failures if f":{sym}:" in f][:3]
+                    th.emit(now, CAT_AUDIT, sym,
+                            f"quarantining {sym} - its data failed verification",
+                            why + [f"no new trade signals on {sym} until it passes "
+                                   f"{need} consecutive clean audits"])
                 self.engine.quarantined.add(sym)
             elif h.dirty:
                 h.clean_streak += 1
@@ -248,3 +267,7 @@ class Auditor:
                     h.dirty = False
                     self.engine.quarantined.discard(sym)
                     log.info("quarantine lifted for %s after %d clean audits", sym, need)
+                    th.emit(now, CAT_AUDIT, sym,
+                            f"{sym} back online - quarantine lifted", [
+                        f"passed {need} consecutive clean audits; "
+                        "signals resume on verified data"])

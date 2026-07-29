@@ -60,6 +60,7 @@ class UiServer:
         self._uv: uvicorn.Server | None = None
         engine.add_signal_listener(self._on_signal)
         engine.add_trade_listener(self._on_trade)
+        engine.thoughts.add_listener(self._on_thought)
         self._signal_out: asyncio.Queue = asyncio.Queue(maxsize=1000)
 
     # ------------------------------------------------------------------ fastapi
@@ -133,6 +134,7 @@ class UiServer:
             "alert_score": self.cfg.composite.alert_score,
             "stale_s": self.cfg.symbol_stale_s,
             "recent_signals": list(self.engine.signal_feed)[-100:],
+            "thoughts": list(self.engine.thoughts.recent)[-150:],
             "board": {
                 "active": self.engine.ledger.active(),
                 "resolved": self.engine.ledger.resolved_recent[-20:][::-1],
@@ -233,6 +235,10 @@ class UiServer:
     def _on_trade(self, kind: str, payload: dict[str, Any]) -> None:
         with contextlib.suppress(asyncio.QueueFull):
             self._signal_out.put_nowait({"type": kind, "trade": payload})
+
+    def _on_thought(self, th: dict[str, Any]) -> None:
+        with contextlib.suppress(asyncio.QueueFull):
+            self._signal_out.put_nowait({"type": "thought", "thought": th})
 
     async def _broadcast(self, text: str) -> None:
         dead = []

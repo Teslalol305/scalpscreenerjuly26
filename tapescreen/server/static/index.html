@@ -51,6 +51,21 @@
         <tbody id="grid-body"></tbody>
       </table>
     </div>
+    <div id="think-pane">
+      <div id="think-head">
+        <div id="think-title">SYSTEM REASONING<u>live decision log — the thinking behind every action</u></div>
+        <div id="think-filters">
+          <button class="tf-chip active" data-cat="all">all</button>
+          <button class="tf-chip" data-cat="signal" title="rule logic: what fired, what was suppressed, the score math">signals</button>
+          <button class="tf-chip" data-cat="trade" title="trade management: ladders, break-even, trailing, exits">trades</button>
+          <button class="tf-chip" data-cat="learning" title="what each finished trade changed: records, weights, ML model">learning</button>
+          <button class="tf-chip" data-cat="audit" title="continuous self-verification and quarantine decisions">audit</button>
+        </div>
+        <span id="think-paused" hidden>⏸ paused while you read — move the mouse away to resume</span>
+        <button id="think-collapse" title="collapse / expand the reasoning log">▾</button>
+      </div>
+      <ol id="think-feed"><li id="think-empty">the system narrates every decision here the moment it makes one — rule fires and suppressions, stop construction, break-even and trailing moves, and what each finished trade taught it.</li></ol>
+    </div>
     <footer id="learn-strip">
       <div id="learn-title">SYSTEM LEARNING<u>measured win rates per strategy</u></div>
       <div id="learn-meters"></div>
@@ -127,6 +142,14 @@
         <h3>Completed list</h3>
         <dl>
           <dt>WIN / LOSS ± R</dt><dd>Final result in R. Exit reason: TARGET-less system — STOP (initial stop hit), BE (break-even stop after banking), TRAIL (trailing stop, usually a win), TIME (2-hour limit).</dd>
+        </dl>
+        <h3>System reasoning (live decision log)</h3>
+        <dl>
+          <dt>What it is</dt><dd>The system narrating its own decisions in real time, with the actual numbers: why each signal fired (and why one was held back), how every stop and entry ladder was constructed, each break-even / trailing-stop move, and exactly what it learned from every finished trade. This is how you verify the logic instead of trusting it blindly.</dd>
+          <dt>signal</dt><dd>Rule logic — the evidence behind a fire, the score math (weight × learned multiplier × strength), tier grading, cooldown suppressions.</dd>
+          <dt>trade</dt><dd>Trade management — ladder fills with the improving average entry, +1R banking, break-even and trailing decisions, exits with the full R accounting.</dd>
+          <dt>learning</dt><dd>Self-improvement — how the finished trade moved the strategy's measured record, its score weight, and the ML model's prediction for the same setup.</dd>
+          <dt>audit</dt><dd>Self-verification — periodic proof that data and logic checks pass, plus quarantine decisions when they don't.</dd>
         </dl>
         <h3>Bottom strip</h3>
         <dl>
