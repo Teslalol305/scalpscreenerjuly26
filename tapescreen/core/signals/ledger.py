@@ -168,7 +168,10 @@ class SignalLedger:
         self.lc = cfg.learning
         self.db = db
         self.th = thoughts
+        # win test cost: crossing the spread once + a full taker round trip,
+        # both as fractions of notional, converted to R-space per trade
         self.haircut = cfg.stats.spread_haircut_bps / 1e4
+        self.fee_frac = 2.0 * getattr(cfg.stats, "taker_fee_bps", 0.0) / 1e4
         self.open: dict[str, list[TradeSignal]] = {}
         self.resolved_recent: list[dict] = []
         self.rule_buckets: dict[str, Bucket] = {}
@@ -555,8 +558,9 @@ class SignalLedger:
         ts.exit_ts = exit_ts
         ts.exit_price = exit_price
         ts.exit_reason = reason
-        # win test net of the spread haircut, converted into R-space
-        haircut_r = self.haircut / (ts.risk_unit / ts.avg_entry) if ts.risk_unit > 0 else 0.0
+        # win test net of costs (spread + taker fee round trip), in R-space
+        cost_frac = self.haircut + self.fee_frac
+        haircut_r = cost_frac / (ts.risk_unit / ts.avg_entry) if ts.risk_unit > 0 else 0.0
         won = ts.total_r > haircut_r
         ts.status = "win" if won else "loss"
         self._streaks.setdefault(ts.rule, deque(maxlen=6)).append(1.0 if won else -1.0)
@@ -569,8 +573,8 @@ class SignalLedger:
                          f"{ts.total_r:+.2f}R {'WIN' if won else 'LOSS'}", [
                 f"exit {px(exit_price)} after {hold_min:.0f} min: open leg "
                 f"{leg:+.2f}R on {frac:.0%} of the plan{banked} = {ts.total_r:+.2f}R total",
-                f"win test: {ts.total_r:+.2f}R must beat the {haircut_r:.2f}R spread "
-                f"haircut -> {'WIN' if won else 'LOSS'}",
+                f"win test: {ts.total_r:+.2f}R must beat the {haircut_r:.2f}R cost "
+                f"haircut (spread + taker fees) -> {'WIN' if won else 'LOSS'}",
             ])
 
         rb = self.rule_buckets.setdefault(ts.rule, Bucket())

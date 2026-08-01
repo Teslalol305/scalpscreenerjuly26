@@ -338,6 +338,54 @@ function renderVars(d) {
   box.innerHTML = h;
 }
 
+/* ---------------- validation tracker ---------------- */
+
+function fmtDate(ts) {
+  return new Date(ts * 1000).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
+function valBar(label, cur, target) {
+  const pct = Math.min(100, (cur / target) * 100).toFixed(0);
+  return `<div class="vt-bar"><u>${esc(label)}</u>
+    <span class="vt-track"><i style="width:${pct}%"></i></span>
+    <b>${cur}/${target}</b></div>`;
+}
+
+function renderValidation(v) {
+  const box = $("validate-body");
+  if (!v) return;
+  const t = v.targets;
+  const nOk = v.validated.length;
+  let h = `<div class="val-banner ${nOk ? "ok" : ""}">${nOk
+    ? `✓ ${v.validated.map(shortRule).join(", ")} validated for real-trading consideration`
+    : "no strategy validated yet — do not trade real money on these signals"}</div>`;
+  h += `<div class="val-crit">the bar, per strategy: ≥${t.min_trades} R-trades · ≥${t.min_days} active days · avg R confidently &gt; 0 (95%, net of spread + fees) · off probation</div>`;
+  for (const r of v.rules) {
+    const ciTxt = r.mean_r == null ? ""
+      : `${fmtSigned(r.mean_r)}R <span class="vt-ci">± ${r.ci_lo == null ? "?" : (r.mean_r - r.ci_lo).toFixed(2)}</span>`;
+    const ciCls = r.ci_lo != null && r.ci_lo > 0 ? "num-up" : r.ci_hi != null && r.ci_hi < 0 ? "num-dn" : "";
+    let eta;
+    if (r.status === "validated") eta = "record complete — gates cleared";
+    else if (r.status === "rejected") eta = "verdict: no measurable edge — do not trade this strategy";
+    else if (r.status === "waiting") eta = "waiting for its first resolved trades";
+    else if (r.eta_ts) eta = `projected ready ~${fmtDate(r.eta_ts)} (${r.rate_per_day}/day)` +
+      (r.on_probation ? " · must also clear probation" : "");
+    else eta = "no recent trades — keep the app running 24/7";
+    h += `<div class="vrow">
+      <div class="vrow-top">
+        <b class="vrow-name">${esc(shortRule(r.rule))}</b>
+        <span class="vst vst-${r.status}">${r.status.toUpperCase()}</span>
+        ${r.win_rate != null ? `<span class="vt-wr">${r.win_rate}% wr</span>` : ""}
+        <span class="vt-exp ${ciCls}">${ciTxt}</span>
+      </div>
+      ${valBar("trades", r.n, t.min_trades)}
+      ${valBar("days", r.days, t.min_days)}
+      <div class="vt-eta">${esc(eta)}</div>
+    </div>`;
+  }
+  box.innerHTML = h;
+}
+
 function renderHealth(st) {
   const a = st.audit;
   const fh = st.feed_health || {};
@@ -1020,6 +1068,7 @@ function connect() {
       drawEquity(msg.curve || []);
       renderDesk(msg.desk);
       renderVars(msg.desk);
+      renderValidation(msg.validation);
     } else if (msg.type === "entry") {
       onEntry(msg.trade);
     } else if (msg.type === "exit") {
@@ -1066,6 +1115,7 @@ function onHello(msg) {
   drawEquity(msg.curve || []);
   renderDesk(msg.desk);
   renderVars(msg.desk);
+  renderValidation(msg.validation);
   const saved = localStorage.getItem("ts-sound");
   setSound(saved === null ? msg.sound_default : saved === "1", false);
 }

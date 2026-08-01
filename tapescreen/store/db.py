@@ -251,6 +251,23 @@ class Db:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def validation_stats(self, recent_since: float) -> list[dict[str, Any]]:
+        """Per-rule resolved R-trade aggregates for the validation tracker."""
+        with self.read_conn() as conn:
+            rows = conn.execute(
+                "SELECT rule, COUNT(*) AS n, SUM(r_result) AS r_sum,"
+                " SUM(r_result * r_result) AS r2_sum, SUM(status='win') AS wins,"
+                " COUNT(DISTINCT CAST(exit_ts / 86400 AS INTEGER)) AS days,"
+                " MIN(exit_ts) AS first_ts, MAX(exit_ts) AS last_ts,"
+                " SUM(exit_ts >= ?) AS recent_n"
+                " FROM trade_signals"
+                " WHERE status IN ('win','loss') AND r_result IS NOT NULL"
+                "   AND exit_ts IS NOT NULL"
+                " GROUP BY rule",
+                (recent_since,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def closed_trades_since(self, since_ts: float) -> list[tuple[float, float]]:
         """(exit_ts, r_result) of resolved trades, oldest first (equity curve)."""
         with self.read_conn() as conn:

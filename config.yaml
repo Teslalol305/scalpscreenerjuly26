@@ -91,8 +91,18 @@ composite:
 
 stats:
   spread_haircut_bps: 2.0       # hit = signed fwd return > haircut
+  taker_fee_bps: 4.5            # venue taker fee per side; trades are judged net
+                                #   of a full taker round trip (2x) + the spread
   horizons_s: [30, 60, 180, 300]
   mfe_mae_window_s: 300
+
+# Validation bar: when a strategy's measured record is large, long, and
+# confidently positive net of costs, it graduates to "validated". Until then
+# the dashboard says so, plainly. A confident NEGATIVE verdict is also an
+# outcome - it rejects the strategy and saves real money.
+validation:
+  min_trades: 150               # resolved R-trades required per strategy
+  min_days: 28                  # distinct active days required (regime coverage)
 
 # Trade-signal ledger + self-learning confidence (screener only - no orders).
 # Trade plans mirror a scale-in / manage-the-winner style: laddered entries,

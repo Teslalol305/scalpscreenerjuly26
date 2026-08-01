@@ -86,7 +86,7 @@ def run_selftest() -> list[str]:
             max_hold_s=7200.0, model_enabled=True, model_lr=0.05, model_l2=0.001,
             model_min_n=30, refit_epochs=3,
         ),
-        stats=SimpleNamespace(spread_haircut_bps=2.0),
+        stats=SimpleNamespace(spread_haircut_bps=2.0, taker_fee_bps=4.5),
     )
     led = SignalLedger(cfg, None)  # type: ignore[arg-type]
     snap = FeatureSnapshot(symbol="BTC")

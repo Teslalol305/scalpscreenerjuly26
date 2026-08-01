@@ -73,8 +73,15 @@ class CompositeConfig:
 @dataclass(slots=True)
 class StatsConfig:
     spread_haircut_bps: float
+    taker_fee_bps: float
     horizons_s: list[int]
     mfe_mae_window_s: int
+
+
+@dataclass(slots=True)
+class ValidationConfig:
+    min_trades: int  # resolved R-trades per strategy before a verdict
+    min_days: int    # distinct active days (regime coverage) before a verdict
 
 
 @dataclass(slots=True)
@@ -146,6 +153,7 @@ class Config:
     rules: dict[str, dict[str, Any]]
     composite: CompositeConfig
     stats: StatsConfig
+    validation: ValidationConfig
     learning: LearningConfig
     research: ResearchConfig
     audit: AuditConfig
@@ -306,8 +314,13 @@ def load_config(path: str | Path = "config.yaml") -> Config:
         ),
         stats=StatsConfig(
             spread_haircut_bps=_num(doc, "stats.spread_haircut_bps", 0),
+            taker_fee_bps=_num(doc, "stats.taker_fee_bps", 0),
             horizons_s=list(horizons),
             mfe_mae_window_s=_int(doc, "stats.mfe_mae_window_s", 30),
+        ),
+        validation=ValidationConfig(
+            min_trades=_int(doc, "validation.min_trades", 10),
+            min_days=_int(doc, "validation.min_days", 1),
         ),
         learning=LearningConfig(
             enabled=_bool(doc, "learning.enabled"),

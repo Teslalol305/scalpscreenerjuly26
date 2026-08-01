@@ -149,7 +149,15 @@
       <div class="cbody" id="vars-body"></div>
     </section>
 
-    <section class="dcard" data-card="health" data-w="12" data-h="4">
+    <section class="dcard" data-card="validate" data-w="8" data-h="6">
+      <header><span class="grab">⠿</span>
+        <div class="ct"><h3>Validation Tracker</h3><u>road to real trading — a verdict is earned, never assumed</u></div>
+        <button class="hide-btn">×</button>
+      </header>
+      <div class="cbody" id="validate-body"><p class="empty-note">first validation pass runs within a minute of boot</p></div>
+    </section>
+
+    <section class="dcard" data-card="health" data-w="4" data-h="6">
       <header><span class="grab">⠿</span>
         <div class="ct"><h3>System Health</h3><u>self-verified every 30s — data and logic, cross-checked</u></div>
         <button class="hide-btn">×</button>
@@ -205,6 +213,11 @@
         <dl>
           <dt>Quant Desk</dt><dd>A deterministic panel that reviews every resolved outcome: a performance analyst (expectancy per strategy), a risk officer (weak strategies go on probation behind a higher confidence bar), a feature scout (see below) and a loop-breaker that guarantees exploration so gating can never starve a strategy of data.</dd>
           <dt>Tracked Variables</dt><dd>The model starts with 12 base inputs. The scout measures candidate variables (time of day, funding percentile, squeeze regime, OI thrust…) against every outcome; when one shows real predictive correlation it is PROMOTED into the models — the system discovers its own new data points. Variables whose evidence decays are retired.</dd>
+        </dl>
+        <h3>Validation Tracker</h3>
+        <dl>
+          <dt>The bar</dt><dd>A strategy is VALIDATED for real-trading consideration only when its record clears all four gates: ≥150 resolved R-trades, ≥28 distinct active days (so the sample spans market regimes), average R confidently above zero at 95% (net of spread + taker fees), and off desk probation. A confidently negative record is REJECTED — a verdict that saves real money. Until a strategy is validated, the banner says plainly: do not trade real money on it.</dd>
+          <dt>projected ready</dt><dd>Estimated date the gates are met at the current trade rate. This only advances while the app runs — keep it running 24/7.</dd>
         </dl>
       </section>
       <section>

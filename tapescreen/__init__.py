@@ -4,4 +4,4 @@ Screener and alerting tool only - it never places orders and promises no
 profitability; every signal is logged with forward outcomes so quality is measured.
 """
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"

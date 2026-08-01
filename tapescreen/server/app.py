@@ -24,6 +24,8 @@ from fastapi.staticfiles import StaticFiles
 
 from tapescreen.config import Config
 from tapescreen.core.engine import Engine, percentile
+from tapescreen.core.thoughts import CAT_DESK
+from tapescreen.core.validation import validation_report
 from tapescreen.feeds.hyperliquid import HyperliquidFeed
 from tapescreen.store.db import Db
 
@@ -52,6 +54,9 @@ class UiServer:
         self.db = db
         self.auditor = auditor
         self.clients: set[WebSocket] = set()
+        self._val: dict[str, Any] | None = None  # cached validation report
+        self._val_ts = 0.0
+        self._val_statuses: dict[str, str] = {}
         self.pipe_lat: deque[float] = deque(maxlen=2000)  # tick->push, seconds (live only)
         self._last_msgs_total = 0
         self._last_rate_ts = time.monotonic()
@@ -119,6 +124,53 @@ class UiServer:
         app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
         return app
 
+    # ------------------------------------------------------------------ validation
+
+    def _probation(self) -> set[str]:
+        r = self.engine.research
+        return set(r.probation) if r is not None else set()
+
+    def _compute_validation(self, now: float) -> None:
+        """Sync refresh (used lazily by hello); push_loop threads the DB read."""
+        if self.db is None:
+            return
+        report = validation_report(self.db, self.cfg, self._probation(), now)
+        self._apply_validation(report, now)
+
+    def _apply_validation(self, report: dict[str, Any], now: float) -> None:
+        """Cache the report; narrate status transitions (rare). Loop-thread only."""
+        self._val_ts = now
+        first = not self._val_statuses
+        for r in report["rules"]:
+            old = self._val_statuses.get(r["rule"])
+            self._val_statuses[r["rule"]] = r["status"]
+            if first or old == r["status"] or old is None:
+                continue
+            if r["status"] == "validated":
+                self.engine.thoughts.emit(now, CAT_DESK, "",
+                    f"validation tracker: {r['rule']} is VALIDATED", [
+                    f"{r['n']} resolved trades over {r['days']} active days; "
+                    f"expectancy {r['mean_r']:+.2f}R with 95% CI low {r['ci_lo']:+.2f}R > 0, "
+                    "net of spread + fees",
+                    "eligible for real-trading consideration - sizing discipline still applies",
+                ])
+            elif r["status"] == "rejected":
+                self.engine.thoughts.emit(now, CAT_DESK, "",
+                    f"validation tracker: {r['rule']} is REJECTED", [
+                    f"{r['n']} trades over {r['days']} days; 95% CI high "
+                    f"{r['ci_hi']:+.2f}R < 0 - the edge is confidently negative",
+                    "a firm no is a result: this verdict saves real money",
+                ])
+        self._val = report
+
+    def _validation(self) -> dict[str, Any] | None:
+        if self._val is None and self.db is not None:
+            try:
+                self._compute_validation(time.time())
+            except Exception:
+                log.exception("validation report failed")
+        return self._val
+
     # ------------------------------------------------------------------ payloads
 
     def _hello(self) -> dict[str, Any]:
@@ -143,6 +195,7 @@ class UiServer:
             "desk": self.engine.research.snapshot() if self.engine.research else None,
             "curve": self.engine.session_curve[-500:],
             "hero": self.engine.hero(),
+            "validation": self._validation(),
         }
 
     def _row(self, sym: str, now: float) -> dict[str, Any]:
@@ -202,7 +255,8 @@ class UiServer:
         return {"type": "grid", "ts": now, "rows": rows, "status": st, "board": board,
                 "desk": self.engine.research.snapshot() if self.engine.research else None,
                 "curve": self.engine.session_curve[-500:],
-                "hero": self.engine.hero()}
+                "hero": self.engine.hero(),
+                "validation": self._val}
 
     def _candles(self, sym: str) -> dict[str, Any]:
         if sym not in self.engine.states:
@@ -262,6 +316,14 @@ class UiServer:
         while True:
             await asyncio.sleep(interval)
             try:
+                if self.db is not None and time.time() - self._val_ts >= 60.0:
+                    now = time.time()
+                    try:
+                        report = await asyncio.to_thread(
+                            validation_report, self.db, self.cfg, self._probation(), now)
+                        self._apply_validation(report, now)
+                    except Exception:
+                        log.exception("validation refresh failed")
                 # forward signals/entries/exits that arrived since last cycle, immediately
                 while not self._signal_out.empty():
                     msg = self._signal_out.get_nowait()
